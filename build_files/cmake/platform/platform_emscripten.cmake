@@ -1,0 +1,98 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+if(NOT DEFINED BLENDER_WASM_DEPS_ROOT)
+  message(FATAL_ERROR "BLENDER_WASM_DEPS_ROOT must name the wasm dependency prefix")
+endif()
+set(LIBDIR "${BLENDER_WASM_DEPS_ROOT}")
+set(WITH_STATIC_LIBS ON)
+list(PREPEND CMAKE_PREFIX_PATH "${LIBDIR}")
+list(APPEND CMAKE_FIND_ROOT_PATH "${LIBDIR}")
+
+find_package(JPEG REQUIRED)
+set(ZLIB_LIBRARY "${LIBDIR}/lib/libz.a" CACHE FILEPATH "wasm zlib" FORCE)
+set(ZLIB_INCLUDE_DIR "${LIBDIR}/include" CACHE PATH "wasm zlib headers" FORCE)
+find_package(ZLIB REQUIRED)
+find_package(PNG REQUIRED)
+find_package(Zstd REQUIRED)
+find_package(fmt CONFIG REQUIRED)
+find_package(Freetype REQUIRED)
+find_package(Brotli REQUIRED)
+find_package(Eigen3 CONFIG REQUIRED)
+find_package(Imath CONFIG REQUIRED)
+set(openjph_DIR "${LIBDIR}/lib/cmake/openjph")
+set(libdeflate_DIR "${LIBDIR}/lib/cmake/libdeflate")
+find_package(OpenEXR CONFIG REQUIRED)
+set(minizip-ng_ROOT "${LIBDIR}" CACHE PATH "wasm minizip-ng prefix" FORCE)
+set(minizip-ng_INCLUDE_DIR "${LIBDIR}/include/minizip-ng/minizip" CACHE PATH "wasm minizip-ng headers" FORCE)
+set(minizip-ng_LIBRARY "${LIBDIR}/lib/libminizip.a" CACHE FILEPATH "wasm minizip-ng archive" FORCE)
+find_package(OpenColorIO CONFIG REQUIRED)
+find_package(OpenImageIO CONFIG REQUIRED)
+
+set(PYTHON_VERSION 3.13)
+set(PYTHON_VERSION_NO_DOTS 313)
+set(PYTHON_INCLUDE_DIR "${LIBDIR}/python/include/python3.13")
+set(PYTHON_INCLUDE_CONFIG_DIR "${LIBDIR}/python/include/python3.13")
+set(PYTHON_INCLUDE_DIRS "${PYTHON_INCLUDE_DIR}")
+set(PYTHON_LIBRARY "${LIBDIR}/python/lib/libpython3.13.a")
+set(PYTHON_NUMPY_INCLUDE_DIRS "${LIBDIR}/python/include/python3.13")
+set(PYTHON_LIBRARIES
+  "${LIBDIR}/python/lib/libnumpy.a"
+  "${PYTHON_LIBRARY}"
+  "${LIBDIR}/python/lib/libHacl_Hash_SHA2.a"
+  "${LIBDIR}/lib/libexpat.a"
+  "${ZLIB_LIBRARY}"
+)
+set(PYTHON_LIBPATH "${LIBDIR}/python/lib")
+set(PYTHON_SITE_PACKAGES "${LIBDIR}/python/lib/python3.13/site-packages")
+set(PYTHON_EXECUTABLE "${LIBDIR}/host-python/bin/python3.13")
+set(PYTHON_LINKFLAGS "")
+
+if(WITH_PUGIXML)
+  set(PUGIXML_ROOT_DIR "${LIBDIR}")
+  find_package(PugiXML REQUIRED)
+endif()
+if(WITH_TBB)
+  set(TBB_DIR "${LIBDIR}/lib/cmake/TBB")
+  find_package(TBB CONFIG REQUIRED)
+  set(TBB_LIBRARIES TBB::tbb)
+  get_target_property(TBB_INCLUDE_DIRS TBB::tbb INTERFACE_INCLUDE_DIRECTORIES)
+endif()
+if(WITH_OPENSUBDIV)
+  set(OPENSUBDIV_ROOT_DIR "${LIBDIR}")
+  find_package(OpenSubdiv REQUIRED)
+endif()
+if(WITH_GMP)
+  set(GMP_ROOT_DIR "${LIBDIR}")
+  find_package(GMP REQUIRED)
+endif()
+if(WITH_MANIFOLD)
+  set(manifold_DIR "${LIBDIR}/lib/cmake/manifold")
+  find_package(manifold CONFIG REQUIRED)
+endif()
+
+set(EPOXY_INCLUDE_DIRS "")
+set(EPOXY_LIBRARIES "")
+set(PTHREADS_LIBRARIES "-pthread")
+set(PLATFORM_LINKLIBS "-pthread")
+set(PLATFORM_LINKFLAGS "")
+set(PLATFORM_LINKFLAGS_DEBUG "")
+# Blender's Unix/Clang source semantics also apply to the wasm target.
+set(PLATFORM_CFLAGS "-funsigned-char -fno-strict-aliasing -ffp-contract=off")
+
+set(BLENDER_WASM_HOST_TOOLS_DIR "" CACHE PATH
+  "Directory containing native datatoc and shader_tool executables for wasm cross builds")
+if(BLENDER_WASM_HOST_TOOLS_DIR)
+  if(NOT EXISTS "${BLENDER_WASM_HOST_TOOLS_DIR}/datatoc" OR
+     NOT EXISTS "${BLENDER_WASM_HOST_TOOLS_DIR}/shader_tool")
+    message(FATAL_ERROR
+      "BLENDER_WASM_HOST_TOOLS_DIR must contain native datatoc and shader_tool executables")
+  endif()
+  set(BLENDER_DATATOC_COMMAND "$<TARGET_FILE:datatoc>")
+  set(BLENDER_SHADER_TOOL_COMMAND "$<TARGET_FILE:shader_tool>")
+else()
+  set(BLENDER_DATATOC_COMMAND datatoc)
+  set(BLENDER_SHADER_TOOL_COMMAND shader_tool)
+endif()
+
+add_compile_options(-pthread -fexceptions $<$<COMPILE_LANGUAGE:CXX>:-Wno-c++11-narrowing>)
+add_link_options(-pthread -fexceptions)

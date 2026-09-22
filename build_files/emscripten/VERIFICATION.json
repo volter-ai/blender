@@ -1,0 +1,511 @@
+{
+  "measuredAt": "2026-09-22T09:29:23.242901+00:00",
+  "upstream": "fbe6228777e7d9afefcd61a413844e790ae75db7",
+  "editorRevision": "71f18e95797ae712ea575ab32b79baa6571297cb",
+  "execution": "World-attached browser editor; existing replay.py --model, fresh engine per model as in the historical working battery",
+  "harnessModified": false,
+  "rawBundle": {
+    "blender_browser.js": {
+      "bytes": 408162,
+      "sha256": "2a5d4dbcc90cab571eb16eef9672ef8583e1c0a3638d0b85165d1944d191d9a7"
+    },
+    "blender_browser.wasm": {
+      "bytes": 86289759,
+      "sha256": "cdf49c116bd5ce56bc4e1c87f7b5da306310eeb86bdf237487b8673e4d6f54a0"
+    },
+    "blender_browser.data": {
+      "bytes": 52698568,
+      "sha256": "bf86b5ca29b86a9d7e1185d8b3eba5bd5101eff9eeef47d36884fbe69b9a2cb7"
+    }
+  },
+  "models": [
+    {
+      "id": "16-market-courtyard",
+      "calls": 95,
+      "expectedCalls": 95,
+      "errorsAt": [
+        2,
+        5,
+        25,
+        61
+      ],
+      "baselineErrorsAt": [
+        2,
+        5,
+        25,
+        61
+      ],
+      "harnessErrors": [],
+      "artifacts": {
+        "result": "different",
+        "matched": 125,
+        "expected": 126
+      },
+      "presentation": {
+        "result": "match",
+        "differences": []
+      }
+    },
+    {
+      "id": "17-workshop-interior",
+      "calls": 63,
+      "expectedCalls": 63,
+      "errorsAt": [
+        2,
+        16
+      ],
+      "baselineErrorsAt": [
+        2,
+        16
+      ],
+      "harnessErrors": [],
+      "artifacts": {
+        "result": "different",
+        "matched": 149,
+        "expected": 150
+      },
+      "presentation": {
+        "result": "match",
+        "differences": []
+      }
+    },
+    {
+      "id": "18-riverside-bridge",
+      "calls": 41,
+      "expectedCalls": 41,
+      "errorsAt": [
+        18
+      ],
+      "baselineErrorsAt": [
+        18
+      ],
+      "harnessErrors": [],
+      "artifacts": {
+        "result": "different",
+        "matched": 76,
+        "expected": 87
+      },
+      "presentation": {
+        "result": "different",
+        "differences": [
+          "Drawable object has no observed geometry: Stream_Path",
+          "Drawable object has no observed geometry: Path_Curve"
+        ]
+      }
+    },
+    {
+      "id": "19-tram-stop",
+      "calls": 70,
+      "expectedCalls": 70,
+      "errorsAt": [
+        11
+      ],
+      "baselineErrorsAt": [
+        11
+      ],
+      "harnessErrors": [],
+      "artifacts": {
+        "result": "different",
+        "matched": 172,
+        "expected": 173
+      },
+      "presentation": {
+        "result": "different",
+        "differences": [
+          "Drawable object has no observed geometry: Profile_Rail",
+          "Drawable object has no observed geometry: Profile_Canopy",
+          "Drawable object has no observed geometry: Profile_Beam"
+        ]
+      }
+    },
+    {
+      "id": "20-rigged-courier",
+      "calls": 93,
+      "expectedCalls": 93,
+      "errorsAt": [
+        3,
+        8,
+        9,
+        21,
+        22,
+        24,
+        25,
+        28,
+        33,
+        35,
+        37,
+        39,
+        41,
+        42,
+        43,
+        44,
+        48,
+        49,
+        50,
+        51,
+        52,
+        57,
+        59,
+        69,
+        79,
+        80,
+        91
+      ],
+      "baselineErrorsAt": [
+        3,
+        8,
+        9,
+        21,
+        22,
+        24,
+        25,
+        28,
+        33,
+        35,
+        37,
+        39,
+        41,
+        42,
+        43,
+        44,
+        48,
+        49,
+        50,
+        51,
+        52,
+        57,
+        59,
+        69,
+        79,
+        80,
+        91
+      ],
+      "harnessErrors": [],
+      "artifacts": {
+        "result": "different",
+        "matched": 60,
+        "expected": 66
+      },
+      "presentation": {
+        "result": "match",
+        "differences": []
+      }
+    }
+  ],
+  "limitations": [
+    "The original working bundle also has the recorded geometry/image differences; no oracle or comparison threshold was changed.",
+    "On the current editor host both bundles produce the same courier render getX errors (27 total recorded error positions); the historical host recorded four.",
+    "Both bundles report geometry-less curve profile nodes in bridge/tram presentation.",
+    "The current shared-engine board stalled on the frozen baseline; the historical fresh-engine-per-model mode was used for this comparison."
+  ],
+  "saveReopen": {
+    "ownedToBaselineToOwned": {
+      "before": {
+        "name": "RoundTripCube",
+        "location": [
+          1.25,
+          -2.5,
+          3.75
+        ],
+        "vertices": 8,
+        "polygons": 6,
+        "marker": "owned-source-roundtrip",
+        "attribute": 0.625,
+        "modifier": 1,
+        "asset": "saved asset metadata",
+        "frame": 17
+      },
+      "after": {
+        "name": "RoundTripCube",
+        "location": [
+          1.25,
+          -2.5,
+          3.75
+        ],
+        "vertices": 8,
+        "polygons": 6,
+        "marker": "owned-source-roundtrip",
+        "attribute": 0.625,
+        "modifier": 1,
+        "asset": "saved asset metadata",
+        "frame": 17
+      }
+    },
+    "originalRecordedCourier": {
+      "before": {
+        "objects": [
+          {
+            "name": "Adventurer_Body",
+            "type": "MESH",
+            "location": [
+              0,
+              0,
+              0
+            ],
+            "vertices": 2029,
+            "polygons": 3812
+          },
+          {
+            "name": "Adventurer_Feet",
+            "type": "MESH",
+            "location": [
+              0,
+              0,
+              0
+            ],
+            "vertices": 244,
+            "polygons": 480
+          },
+          {
+            "name": "Adventurer_Head",
+            "type": "MESH",
+            "location": [
+              0,
+              0,
+              0
+            ],
+            "vertices": 319,
+            "polygons": 584
+          },
+          {
+            "name": "Adventurer_Legs",
+            "type": "MESH",
+            "location": [
+              0,
+              0,
+              0
+            ],
+            "vertices": 413,
+            "polygons": 822
+          },
+          {
+            "name": "CalChart",
+            "type": "MESH",
+            "location": [
+              0,
+              0,
+              0
+            ],
+            "vertices": 36,
+            "polygons": 9
+          },
+          {
+            "name": "CharacterArmature",
+            "type": "ARMATURE",
+            "location": [
+              0,
+              0,
+              0
+            ],
+            "vertices": null,
+            "polygons": null
+          },
+          {
+            "name": "Courier_Satchel",
+            "type": "MESH",
+            "location": [
+              0,
+              0,
+              0
+            ],
+            "vertices": 544,
+            "polygons": 408
+          },
+          {
+            "name": "Fill",
+            "type": "LIGHT",
+            "location": [
+              -3,
+              -2,
+              1.600000023841858
+            ],
+            "vertices": null,
+            "polygons": null
+          },
+          {
+            "name": "Ground",
+            "type": "MESH",
+            "location": [
+              0,
+              0,
+              0
+            ],
+            "vertices": 4,
+            "polygons": 1
+          },
+          {
+            "name": "HeroCam",
+            "type": "CAMERA",
+            "location": [
+              2.1447627544403076,
+              -3.7148380279541016,
+              1.249952793121338
+            ],
+            "vertices": null,
+            "polygons": null
+          },
+          {
+            "name": "Key",
+            "type": "LIGHT",
+            "location": [
+              2.4000000953674316,
+              -3,
+              3
+            ],
+            "vertices": null,
+            "polygons": null
+          },
+          {
+            "name": "Rim",
+            "type": "LIGHT",
+            "location": [
+              0.6000000238418579,
+              3.4000000953674316,
+              2.799999952316284
+            ],
+            "vertices": null,
+            "polygons": null
+          }
+        ],
+        "frame": 1
+      },
+      "after": {
+        "objects": [
+          {
+            "name": "Adventurer_Body",
+            "type": "MESH",
+            "location": [
+              0,
+              0,
+              0
+            ],
+            "vertices": 2029,
+            "polygons": 3812
+          },
+          {
+            "name": "Adventurer_Feet",
+            "type": "MESH",
+            "location": [
+              0,
+              0,
+              0
+            ],
+            "vertices": 244,
+            "polygons": 480
+          },
+          {
+            "name": "Adventurer_Head",
+            "type": "MESH",
+            "location": [
+              0,
+              0,
+              0
+            ],
+            "vertices": 319,
+            "polygons": 584
+          },
+          {
+            "name": "Adventurer_Legs",
+            "type": "MESH",
+            "location": [
+              0,
+              0,
+              0
+            ],
+            "vertices": 413,
+            "polygons": 822
+          },
+          {
+            "name": "CalChart",
+            "type": "MESH",
+            "location": [
+              0,
+              0,
+              0
+            ],
+            "vertices": 36,
+            "polygons": 9
+          },
+          {
+            "name": "CharacterArmature",
+            "type": "ARMATURE",
+            "location": [
+              0,
+              0,
+              0
+            ],
+            "vertices": null,
+            "polygons": null
+          },
+          {
+            "name": "Courier_Satchel",
+            "type": "MESH",
+            "location": [
+              0,
+              0,
+              0
+            ],
+            "vertices": 544,
+            "polygons": 408
+          },
+          {
+            "name": "Fill",
+            "type": "LIGHT",
+            "location": [
+              -3,
+              -2,
+              1.600000023841858
+            ],
+            "vertices": null,
+            "polygons": null
+          },
+          {
+            "name": "Ground",
+            "type": "MESH",
+            "location": [
+              0,
+              0,
+              0
+            ],
+            "vertices": 4,
+            "polygons": 1
+          },
+          {
+            "name": "HeroCam",
+            "type": "CAMERA",
+            "location": [
+              2.1447627544403076,
+              -3.7148380279541016,
+              1.249952793121338
+            ],
+            "vertices": null,
+            "polygons": null
+          },
+          {
+            "name": "Key",
+            "type": "LIGHT",
+            "location": [
+              2.4000000953674316,
+              -3,
+              3
+            ],
+            "vertices": null,
+            "polygons": null
+          },
+          {
+            "name": "Rim",
+            "type": "LIGHT",
+            "location": [
+              0.6000000238418579,
+              3.4000000953674316,
+              2.799999952316284
+            ],
+            "vertices": null,
+            "polygons": null
+          }
+        ],
+        "frame": 1
+      }
+    }
+  }
+}

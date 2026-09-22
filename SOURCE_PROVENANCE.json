@@ -1,0 +1,12 @@
+{
+  "snapshot": "volter-editor-blender-5.2.0-wasm-2026-09-22",
+  "reviewedRevision": "a4dff7ba16a0cca24504d81ed0086457493e48dc",
+  "reviewedSourceArchive": {
+    "name": "blender-a4dff7ba16a-source.tar.gz",
+    "sha256": "60f4789ec1a3bc9379bc208c7ce28ee1a4fee7787436a998b2d1ed5748689ec4"
+  },
+  "upstreamRevision": "fbe6228777e7d9afefcd61a413844e790ae75db7",
+  "upstreamVersion": "5.2.0 LTS",
+  "historyImported": false,
+  "purpose": "Corresponding source for Volter Editor's Blender WebAssembly engine"
+}

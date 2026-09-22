@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -ne 3 ]]; then
+  echo "usage: $0 <source-dir> <build-dir> <install-prefix>" >&2
+  exit 64
+fi
+
+source_dir=$1
+build_dir=$2
+install_prefix=$3
+available_kb=$(df -Pk / | awk 'NR == 2 {print $4}')
+
+if (( available_kb < 25 * 1024 * 1024 )); then
+  echo "refusing build: less than 25 GiB available on /" >&2
+  exit 75
+fi
+
+emcmake cmake -S "$source_dir" -B "$build_dir" -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX="$install_prefix" \
+  -DCMAKE_INSTALL_INCLUDEDIR="include/minizip-ng" \
+  -DCMAKE_C_FLAGS="-pthread -fexceptions" \
+  -DCMAKE_CXX_FLAGS="-pthread -fexceptions" \
+  -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+  -DBUILD_SHARED_LIBS=OFF \
+  -DMZ_FETCH_LIBS=OFF \
+  -DMZ_LIBCOMP=OFF \
+  -DMZ_PKCRYPT=OFF \
+  -DMZ_WZAES=OFF \
+  -DMZ_OPENSSL=OFF \
+  -DMZ_LIBBSD=OFF \
+  -DMZ_SIGNING=OFF \
+  -DMZ_LZMA=OFF \
+  -DMZ_ZSTD=OFF \
+  -DMZ_BZIP2=OFF \
+  -DMZ_ICONV=OFF \
+  -DMZ_ZLIB=ON \
+  -DZLIB_LIBRARY="$install_prefix/lib/libz.a" \
+  -DZLIB_INCLUDE_DIR="$install_prefix/include"
+
+nice -n 19 cmake --build "$build_dir" --parallel 6
+nice -n 19 cmake --install "$build_dir"
