@@ -40,7 +40,10 @@
  * or a SINGLE texture, because that is what a three.js standard material IS. A
  * graph this cannot reduce is a WARNING naming the node (carried in the
  * frame's `warnings`), and the material falls back to the constant -- never an
- * exception, because this call also carries the geometry.
+ * exception, because this call also carries the geometry. A material the
+ * caller draws from its node graph (`graph_materials`) is still reduced, so its
+ * constants ship, but quietly; the caller names what its graph cannot carry,
+ * and the door ships the images that graph samples (`graph_images`).
  *
  * WHAT THE FRAME IS, is the presenter's own schema
  * (`packages/mesh/contributions/blender-runtime-view.ts`), which is strict in
@@ -96,6 +99,7 @@
 #include "BKE_image.hh"
 #include "BKE_image_partial_update.hh"
 #include "BKE_layer.hh"
+#include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_material.hh"
 #include "BKE_mesh.hh"
@@ -251,6 +255,14 @@ struct Options {
    *  `known`; see `parse_options`, which names any other key in the frame's
    *  warnings rather than ignoring it. */
   std::unordered_map<std::string, long long> known;
+  /** Materials the CALLER draws from their node graph (the session's
+   *  `material_graph`): still reduced, so their constants ship, but their
+   *  reduction names nothing -- the caller warns for what its graph cannot
+   *  carry. */
+  std::unordered_set<std::string> graph_materials;
+  /** Images those graphs sample, shipped with every other picture at the same
+   *  revisions; the frame's `graph_images` says which revision each is at. */
+  std::vector<std::string> graph_images;
   std::vector<std::string> unknown_keys;
 };
 
@@ -336,6 +348,31 @@ static const char *skip_value(const char *c)
   return c;
 }
 
+/** A JSON array of strings, appended to `out`; returns the position past it. */
+static const char *read_string_array(const char *c, std::vector<std::string> &out)
+{
+  c = skip_space(c);
+  if (*c != '[') {
+    return skip_value(c);
+  }
+  c++;
+  while (*c && *c != ']') {
+    c = skip_space(c);
+    if (*c == '"') {
+      std::string item;
+      const char *end = read_string(c, item);
+      if (end == nullptr) {
+        return c;
+      }
+      out.push_back(item);
+      c = end;
+      continue;
+    }
+    c++;
+  }
+  return *c == ']' ? c + 1 : c;
+}
+
 static Options parse_options(const char *options_json)
 {
   Options options;
@@ -372,6 +409,16 @@ static Options parse_options(const char *options_json)
     if (key == "evaluate") {
       options.evaluate = (strncmp(value, "true", 4) == 0);
       c = value;
+      continue;
+    }
+    if (key == "graph_materials") {
+      std::vector<std::string> names;
+      c = read_string_array(value, names);
+      options.graph_materials.insert(names.begin(), names.end());
+      continue;
+    }
+    if (key == "graph_images") {
+      c = read_string_array(value, options.graph_images);
       continue;
     }
     if (key == "known" && *value == '{') {
@@ -577,8 +624,14 @@ static void ensure_callbacks()
 
 static std::vector<std::string> *g_warnings = nullptr;
 
+/** True while reducing a material the caller draws from its graph. */
+static bool g_quiet = false;
+
 static void unreached(const std::string &what)
 {
+  if (g_quiet) {
+    return;
+  }
   if (g_warned.count(what)) {
     return;
   }
@@ -2042,7 +2095,9 @@ static std::string export_frame(const char *options_json)
       const std::string material_name(material_original->id.name + 2);
       json_escape(objects_json, material_name.c_str());
       if (!materials.count(material_name)) {
+        g_quiet = options.graph_materials.count(material_name) != 0;
         materials[material_name] = reduce_material(material_original);
+        g_quiet = false;
       }
     }
     objects_json += "],\"matrix\":";
@@ -2204,6 +2259,32 @@ static std::string export_frame(const char *options_json)
     materials_json += "}";
   }
 
+  /* THE PICTURES THE CALLER'S GRAPHS SAMPLE, shipped like every other and at
+   * the same revisions; `graph_images` tells the caller which revision each
+   * is at, because a picture it already holds is left out of `images`. */
+  std::string graph_images_json;
+  for (const std::string &name : options.graph_images) {
+    Image *image = reinterpret_cast<Image *>(
+        BKE_libblock_find_name(resolved.bmain, ID_IM, name.c_str()));
+    if (image == nullptr) {
+      unreached("graph image '" + name + "' is not an image of this file");
+      continue;
+    }
+    images.emplace(name, std::make_pair(image, RoughnessRemap()));
+    if (repainted.insert(image).second && image_pixels_changed(image)) {
+      g_session.id_revision[&image->id] += 1;
+    }
+    if (g_session.id_revision[&image->id] == 0) {
+      g_session.id_revision[&image->id] = 1;
+    }
+    if (!graph_images_json.empty()) {
+      graph_images_json += ",";
+    }
+    json_escape(graph_images_json, name.c_str());
+    graph_images_json += ":";
+    json_int(graph_images_json, g_session.id_revision[&image->id]);
+  }
+
   std::string images_json;
   bool first_image = true;
   for (auto &entry : images) {
@@ -2261,7 +2342,7 @@ static std::string export_frame(const char *options_json)
    * already has -- and the presenter's frame schema is strict. */
   out += ",\"updated\":[" + updated_json + "],\"objects\":[" + objects_json + "],\"meshes\":{" +
          meshes_json + "},\"materials\":{" + materials_json + "},\"images\":{" + images_json +
-         "},\"lights\":{" + lights_json + "},\"warnings\":[";
+         "},\"graph_images\":{" + graph_images_json + "},\"lights\":{" + lights_json + "},\"warnings\":[";
   for (size_t i = 0; i < warnings.size(); i++) {
     if (i) {
       out += ",";
