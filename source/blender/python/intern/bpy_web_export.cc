@@ -43,7 +43,9 @@
  * exception, because this call also carries the geometry. A material the
  * caller draws from its node graph (`graph_materials`) is still reduced, so its
  * constants ship, but quietly; the caller names what its graph cannot carry,
- * and the door ships the images that graph samples (`graph_images`).
+ * and the door ships the images that graph samples (`graph_images`), the one
+ * Principled BSDF a shader mix it composes reaches, and the orco of a deformed
+ * mesh whose graph reads Generated coordinates (`graph_generated`).
  *
  * WHAT THE FRAME IS, is the presenter's own schema
  * (`packages/mesh/contributions/blender-runtime-view.ts`), which is strict in
@@ -84,6 +86,7 @@
 #include "DNA_light_types.h"
 #include "DNA_material_types.h"
 #include "DNA_mesh_types.h"
+#include "DNA_modifier_types.h"
 #include "DNA_node_types.h"
 #include "DNA_object_enums.h"
 #include "DNA_object_types.h"
@@ -103,7 +106,9 @@
 #include "BKE_main.hh"
 #include "BKE_material.hh"
 #include "BKE_mesh.hh"
+#include "BKE_modifier.hh"
 #include "BKE_object.hh"
+#include "BKE_object_types.hh"
 #include "BKE_scene.hh"
 
 #include "IMB_imbuf_types.hh"
@@ -263,6 +268,9 @@ struct Options {
   /** Images those graphs sample, shipped with every other picture at the same
    *  revisions; the frame's `graph_images` says which revision each is at. */
   std::vector<std::string> graph_images;
+  /** Those of the graphs that read Generated coordinates: a deformed mesh
+   *  wearing one ships its orco column (`deformed_orco`). */
+  std::unordered_set<std::string> graph_generated;
   std::vector<std::string> unknown_keys;
 };
 
@@ -417,6 +425,12 @@ static Options parse_options(const char *options_json)
       options.graph_materials.insert(names.begin(), names.end());
       continue;
     }
+    if (key == "graph_generated") {
+      std::vector<std::string> names;
+      c = read_string_array(value, names);
+      options.graph_generated.insert(names.begin(), names.end());
+      continue;
+    }
     if (key == "graph_images") {
       c = read_string_array(value, options.graph_images);
       continue;
@@ -469,13 +483,26 @@ static Options parse_options(const char *options_json)
  * \{ */
 
 struct Session {
-  /** Revision per datablock, bumped from the depsgraph's update record. */
-  std::unordered_map<const ID *, long long> id_revision;
+  /** Revision per datablock, bumped from the depsgraph's update record. Keyed
+   *  by `session_uid`, never the pointer: a datablock deleted and re-created
+   *  under the same name can land at the same address, and must not inherit
+   *  the revision the presenter already holds for that name. */
+  std::unordered_map<unsigned int, long long> id_revision;
+  /** Every revision an `id_revision` entry takes is the next of this clock,
+   *  so two datablocks that ever shared a name never share a revision. */
+  long long revision_clock = 0;
   /** Revision per GEOMETRY key -- an evaluated mesh, not a mesh datablock. */
   std::unordered_map<std::string, long long> geometry_revision;
+  /** Whether a geometry key's columns carry `orco` at its revision: a flip
+   *  bumps the revision like a geometry change, since the columns change. */
+  std::unordered_map<std::string, bool> geometry_orco;
   /** THE UPDATE RECORD SINCE THE LAST FRAME, from every evaluation whoever ran
    *  it -- see `web_export_update_post`. Original ID -> OR of `recalc` flags. */
   std::unordered_map<const ID *, uint32_t> pending;
+  /** The same record's datablocks by `session_uid`, taken while they are
+   *  alive: a datablock freed before the next frame leaves a pointer here
+   *  that must never be read through. */
+  std::unordered_set<unsigned int> pending_uids;
   long long frame_revision = 0;
   std::string id;
 };
@@ -519,6 +546,7 @@ static void accumulate_updates(Depsgraph *depsgraph)
     ID *id_eval = static_cast<ID *>(iter.current);
     if (id_eval != nullptr) {
       g_session.pending[DEG_get_original_id(id_eval)] |= uint32_t(id_eval->recalc);
+      g_session.pending_uids.insert(DEG_get_original_id(id_eval)->session_uid);
       if (GS(id_eval->name) == ID_OB) {
         const Object *object = reinterpret_cast<const Object *>(id_eval);
         if (object->data != nullptr) {
@@ -530,6 +558,7 @@ static void accumulate_updates(Depsgraph *depsgraph)
              * needs -- its evaluated mesh moves while the datablock does not. */
             g_session.pending[DEG_get_original_id(&object->id)] |= uint32_t(ID_RECALC_GEOMETRY);
             g_session.pending[DEG_get_original_id(data_id)] |= uint32_t(data_id->recalc);
+            g_session.pending_uids.insert(DEG_get_original_id(data_id)->session_uid);
           }
         }
       }
@@ -922,6 +951,78 @@ static const bNodeSocket *mix_shader_factor(const bNode *node)
   return nullptr;
 }
 
+/** The Mix Shader input the camera sees alone -- 1 or 2 -- when its factor
+ * is a Light Path's Is Shadow Ray (0 on a camera ray) or Is Camera Ray (1), or
+ * a constant 0 or 1; 0 when the factor mixes both. */
+static int camera_side(const bNodeTree *tree, const bNode *node)
+{
+  const bNodeSocket *factor = mix_shader_factor(node);
+  for (const bNodeLink &link : tree->links) {
+    if (link.tosock == factor && link.tonode == node) {
+      if (link.fromnode != nullptr && STREQ(link.fromnode->idname, "ShaderNodeLightPath") &&
+          link.fromsock != nullptr)
+      {
+        if (STREQ(link.fromsock->name, "Is Shadow Ray")) {
+          return 1;
+        }
+        if (STREQ(link.fromsock->name, "Is Camera Ray")) {
+          return 2;
+        }
+      }
+      return 0;
+    }
+  }
+  const float value = socket_float(factor, 0.5f);
+  return value == 0.0f ? 1 : (value == 1.0f ? 2 : 0);
+}
+
+/** THE ONE PRINCIPLED BSDF a shader mix reaches, through Mix Shader, Add
+ * Shader and reroutes, or null when it reaches none or more than one. A
+ * material the caller draws from its graph (`graph_materials`) composes the
+ * mix itself and needs from the door only that BSDF's constants; the caller
+ * refuses the same trees this refuses. */
+static void collect_principled(const bNodeTree *tree,
+                               const bNode *node,
+                               Vector<const bNode *> &found,
+                               int depth)
+{
+  if (node == nullptr || depth > 64) {
+    return;
+  }
+  if (STREQ(node->idname, "ShaderNodeBsdfPrincipled")) {
+    found.append_non_duplicates(node);
+    return;
+  }
+  if (!STREQ(node->idname, "ShaderNodeMixShader") && !STREQ(node->idname, "ShaderNodeAddShader") &&
+      !STREQ(node->idname, "NodeReroute"))
+  {
+    return;
+  }
+  /* A mix the camera sees one side of contributes only that side, as the
+   * surface walk below collapses it. */
+  if (STREQ(node->idname, "ShaderNodeMixShader")) {
+    const int side = camera_side(tree, node);
+    if (side != 0) {
+      collect_principled(tree, mix_shader_input(tree, node, side), found, depth + 1);
+      return;
+    }
+  }
+  for (const bNodeLink &link : tree->links) {
+    if (link.tonode == node && link.fromnode != nullptr && !(link.flag & NODE_LINK_MUTED) &&
+        link.tosock != nullptr && link.tosock->type == SOCK_SHADER)
+    {
+      collect_principled(tree, link.fromnode, found, depth + 1);
+    }
+  }
+}
+
+static const bNode *graph_principled(const bNodeTree *tree, const bNode *node)
+{
+  Vector<const bNode *> found;
+  collect_principled(tree, node, found, 0);
+  return found.size() == 1 ? found[0] : nullptr;
+}
+
 /** A Roughness input reduced to an image, straight or through a LINEAR Map
  *  Range this door bakes. Anything else is a warning naming the node, and the
  *  constant roughness is what is drawn. */
@@ -1035,7 +1136,19 @@ static StandardMaterial reduce_material(const Material *material)
    * of them: `Is Shadow Ray` is 0 on a camera ray (the first shader),
    * `Is Camera Ray` is 1 (the second). Any other factor mixes two BSDFs per
    * pixel, which a standard material cannot draw, and is refused by name. */
-  while (STREQ(surface->idname, "ShaderNodeMixShader")) {
+  while (STREQ(surface->idname, "ShaderNodeMixShader") ||
+         STREQ(surface->idname, "ShaderNodeAddShader"))
+  {
+    if (STREQ(surface->idname, "ShaderNodeAddShader")) {
+      const bNode *lit = g_quiet ? graph_principled(tree, surface) : nullptr;
+      if (lit == nullptr) {
+        unreached(out.name + ": Add Shader sums two closures, which a standard material cannot "
+                             "draw; the object colour is what is drawn");
+        return out;
+      }
+      surface = lit;
+      break;
+    }
     const bNodeSocket *factor = mix_shader_factor(surface);
     const bNodeLink *factor_link = nullptr;
     for (const bNodeLink &link : tree->links) {
@@ -1048,6 +1161,11 @@ static StandardMaterial reduce_material(const Material *material)
     if (factor_link == nullptr) {
       const float value = socket_float(factor, 0.5f);
       side = value == 0.0f ? 1 : (value == 1.0f ? 2 : 0);
+      const bNode *lit = side == 0 && g_quiet ? graph_principled(tree, surface) : nullptr;
+      if (lit != nullptr) {
+        surface = lit;
+        break;
+      }
       if (side == 0) {
         unreached(out.name + ": Mix Shader is mixed by a constant " + std::to_string(value) +
                   "; the object colour is what is drawn");
@@ -1063,6 +1181,12 @@ static StandardMaterial reduce_material(const Material *material)
       }
       else if (STREQ(factor_link->fromsock->name, "Is Camera Ray")) {
         side = 2;
+      }
+    }
+    if (side == 0 && g_quiet) {
+      if (const bNode *lit = graph_principled(tree, surface)) {
+        surface = lit;
+        break;
       }
     }
     if (side == 0) {
@@ -1515,7 +1639,61 @@ static ColumnRef flag_column(const bke::AttributeAccessor &attributes,
  * `edgeSharp` and the `custom_normal` layer (which arrives through the generic
  * attributes below), so a normal column here would be bytes nothing reads.
  */
-static void write_mesh(std::string &out, const Mesh &mesh, const long long revision)
+/** GENERATED COORDINATES OF A DEFORMED MESH, as Blender derives them when
+ * every modifier only moves vertices: the undeformed positions through the
+ * undeformed mesh's texture space (`BKE_mesh_orco_ensure`), one per vertex,
+ * in Blender's stored -1..1 range. Empty when the evaluated mesh IS its
+ * datablock (the presenter derives orco from the drawn positions exactly) or
+ * when a modifier changes topology, whose orco Blender interpolates through
+ * the stack and this door does not carry (the caller names that). */
+/** The mesh an evaluated object's modifiers started from: the evaluated copy
+ * of its datablock, which `BKE_object_eval_assign_data` moved aside when it
+ * put the modifier result in `object->data`. */
+static Mesh *input_mesh(const Object *object)
+{
+  if (object->type != OB_MESH) {
+    return nullptr;
+  }
+  ID *input = object->runtime->data_orig != nullptr ? object->runtime->data_orig : object->data;
+  return input != nullptr && GS(input->name) == ID_ME ? reinterpret_cast<Mesh *>(input) : nullptr;
+}
+
+static bool orco_derivable(const Object *object, const Mesh &evaluated)
+{
+  const Mesh *input = input_mesh(object);
+  if (input == nullptr || input->verts_num != evaluated.verts_num) {
+    return false;
+  }
+  for (const ModifierData &md : object->modifiers) {
+    if ((md.mode & eModifierMode_Realtime) == 0) {
+      continue;
+    }
+    const ModifierTypeInfo *info = BKE_modifier_get_info(ModifierType(md.type));
+    if (info == nullptr || info->type != ModifierTypeType::OnlyDeform) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static Array<float3> deformed_orco(const Object *object)
+{
+  /* `BKE_mesh_orco_verts_get` and `BKE_mesh_orco_verts_transform`, of the
+   * input mesh (the former reads `object->data`, the modifier result here). */
+  Mesh *input = input_mesh(object);
+  const Mesh *source = input->texcomesh ? input->texcomesh : input;
+  Array<float3> orco(input->verts_num, float3(0.0f));
+  const Span<float3> positions = source->vert_positions();
+  const int64_t count = std::min<int64_t>(positions.size(), orco.size());
+  orco.as_mutable_span().take_front(count).copy_from(positions.take_front(count));
+  BKE_mesh_orco_verts_transform(input, orco.as_mutable_span(), false);
+  return orco;
+}
+
+static void write_mesh(std::string &out,
+                       const Mesh &mesh,
+                       const long long revision,
+                       const Span<float3> orco = {})
 {
   const Span<float3> positions = mesh.vert_positions();
   const Span<int> corner_verts = mesh.corner_verts();
@@ -1568,6 +1746,10 @@ static void write_mesh(std::string &out, const Mesh &mesh, const long long revis
   }
 
   const ColumnRef co_ref = arena_write(co.data(), co.size() * 4, "f32", size_t(nv), 3);
+  const ColumnRef orco_ref = orco.size() == size_t(nv) ?
+                                 arena_write(orco.data(), orco.size() * sizeof(float3), "f32",
+                                             size_t(nv), 3) :
+                                 ColumnRef();
   /* Evaluated normals are Blender's, including smooth fans, sharp edges and
    * custom normals. UV splits in the presenter must not recompute them. */
   const Span<float3> corner_normals = mesh.corner_normals();
@@ -1727,6 +1909,7 @@ static void write_mesh(std::string &out, const Mesh &mesh, const long long revis
   bool first = true;
   json_column(out, "co", co_ref, first);
   json_column(out, "cornerNormal", corner_normal_ref, first);
+  json_column(out, "orco", orco_ref, first);
   json_column(out, "faceStart", face_start_ref, first);
   json_column(out, "corner", corner_ref, first);
   json_column(out, "cornerEdge", corner_edge_ref, first);
@@ -1761,26 +1944,29 @@ static uint8_t quantize(const float value)
  *  False means the image has no readable pixels; the caller leaves it out of
  *  the frame rather than shipping a zero-sized one, because the presenter's
  *  raster schema has no such thing. */
-static bool write_image(std::string &out,
-                        Image *image,
-                        const long long revision,
-                        const RoughnessRemap &remap)
+/** One image buffer's pixels as RGBA bytes; `iuser` picks a UDIM tile. */
+static bool read_pixels(Image *image,
+                        ImageUser *iuser,
+                        int &width,
+                        int &height,
+                        std::vector<uint8_t> &rgba)
 {
   void *lock = nullptr;
-  ImBuf *ibuf = BKE_image_acquire_ibuf(image, nullptr, &lock);
-  if (ibuf == nullptr || ibuf->x <= 0 || ibuf->y <= 0) {
+  ImBuf *ibuf = BKE_image_acquire_ibuf(image, iuser, &lock);
+  if (ibuf == nullptr || ibuf->x <= 0 || ibuf->y <= 0 ||
+      (ibuf->byte_buffer.data == nullptr && ibuf->float_buffer.data == nullptr))
+  {
     BKE_image_release_ibuf(image, ibuf, lock);
-    unreached(std::string("image ") + (image->id.name + 2) + " has no readable pixels");
     return false;
   }
-  const int width = ibuf->x;
-  const int height = ibuf->y;
+  width = ibuf->x;
+  height = ibuf->y;
   const size_t texels = size_t(width) * size_t(height);
-  std::vector<uint8_t> rgba(texels * 4, uint8_t(0));
+  rgba.assign(texels * 4, uint8_t(0));
   if (ibuf->byte_buffer.data != nullptr) {
     memcpy(rgba.data(), ibuf->byte_buffer.data, texels * 4);
   }
-  else if (ibuf->float_buffer.data != nullptr) {
+  else {
     const float *source = ibuf->float_buffer.data;
     const int channels = ibuf->channels == 0 ? 4 : ibuf->channels;
     for (size_t i = 0; i < texels; i++) {
@@ -1791,12 +1977,22 @@ static bool write_image(std::string &out,
       }
     }
   }
-  else {
-    BKE_image_release_ibuf(image, ibuf, lock);
+  BKE_image_release_ibuf(image, ibuf, lock);
+  return true;
+}
+
+static bool write_image(std::string &out,
+                        Image *image,
+                        const long long revision,
+                        const RoughnessRemap &remap)
+{
+  int width = 0, height = 0;
+  std::vector<uint8_t> rgba;
+  if (!read_pixels(image, nullptr, width, height, rgba)) {
     unreached(std::string("image ") + (image->id.name + 2) + " has no readable pixels");
     return false;
   }
-  BKE_image_release_ibuf(image, ibuf, lock);
+  const size_t texels = size_t(width) * size_t(height);
 
   /* Blender's own colour space for the picture: an sRGB image is linearised by
    * the presenter's sampler, a Non-Color one is data. A BAKED roughness map is
@@ -1842,6 +2038,46 @@ static bool write_image(std::string &out,
   json_column(column, "x", rgba_ref, first);
   /* `json_column` writes `"x":{...}`; only the object is wanted here. */
   out += column.substr(column.find(':') + 1);
+  /* A UDIM image's EVERY TILE, by tile number; the picture above is its first
+   * tile, which is what a non-flat projection samples (as EEVEE does). */
+  if (image->source == IMA_SRC_TILED && !remap.present) {
+    out += ",\"tiles\":[";
+    bool first_tile = true;
+    for (ImageTile &tile : image->tiles) {
+      ImageUser iuser{};
+      BKE_imageuser_default(&iuser);
+      iuser.tile = tile.tile_number;
+      int tile_width = 0, tile_height = 0;
+      std::vector<uint8_t> tile_rgba;
+      if (!read_pixels(image, &iuser, tile_width, tile_height, tile_rgba)) {
+        unreached(std::string("image ") + (image->id.name + 2) + " tile " +
+                  std::to_string(tile.tile_number) + " has no readable pixels");
+        continue;
+      }
+      const ColumnRef tile_ref = arena_write(tile_rgba.data(),
+                                             tile_rgba.size(),
+                                             "u8",
+                                             size_t(tile_width) * size_t(tile_height),
+                                             4);
+      if (!first_tile) {
+        out += ",";
+      }
+      first_tile = false;
+      out += "{\"number\":";
+      json_int(out, tile.tile_number);
+      out += ",\"width\":";
+      json_int(out, tile_width);
+      out += ",\"height\":";
+      json_int(out, tile_height);
+      out += ",\"rgba\":";
+      bool first_column = true;
+      std::string tile_column;
+      json_column(tile_column, "x", tile_ref, first_column);
+      out += tile_column.substr(tile_column.find(':') + 1);
+      out += "}";
+    }
+    out += "]";
+  }
   out += "}";
   return true;
 }
@@ -1905,18 +2141,17 @@ static std::string export_frame(const char *options_json)
    * the door's own work; the callback covers everybody else's. */
   accumulate_updates(resolved.depsgraph);
 
-  std::unordered_set<const ID *> dirty;
   std::unordered_set<const ID *> geometry_dirty;
   for (const std::pair<const ID *const, uint32_t> &entry : g_session.pending) {
-    dirty.insert(entry.first);
     if (entry.second & uint32_t(ID_RECALC_GEOMETRY)) {
       geometry_dirty.insert(entry.first);
     }
   }
   g_session.pending.clear();
-  for (const ID *id : dirty) {
-    g_session.id_revision[id] += 1;
+  for (const unsigned int uid : g_session.pending_uids) {
+    g_session.id_revision[uid] = ++g_session.revision_clock;
   }
+  g_session.pending_uids.clear();
   /* The record has been read; the next evaluation starts from a clean slate. */
   DEG_ids_clear_recalc(resolved.depsgraph, false);
 
@@ -1964,7 +2199,37 @@ static std::string export_frame(const char *options_json)
                                 (mesh_original == DEG_get_original_id(
                                                       static_cast<ID *>(object->data)));
       geometry_key = is_datablock ? std::string(mesh_original->name + 2) : name;
-      const bool moved = geometry_dirty.count(original) ||
+      /* A DEFORMED mesh whose material graph reads Generated coordinates
+       * carries its orco, when every modifier only deforms. Deformed is
+       * "its positions are not its input's": an undeformed evaluation shares
+       * the input's position array (implicit sharing), a deform writes a new
+       * one. The orco is the input mesh's, so objects sharing one datablock
+       * share it too; the first object of a geometry key decides, once. */
+      bool orco = false;
+      bool orco_flipped = false;
+      if (!seen_meshes.count(geometry_key)) {
+        const Mesh *input = input_mesh(object);
+        const bool deformed = input != nullptr && input != mesh_eval &&
+                              input->vert_positions().data() !=
+                                  mesh_eval->vert_positions().data();
+        for (int slot = 0; deformed && !orco && slot < object->totcol; slot++) {
+          const Material *material = BKE_object_material_get_eval(object, short(slot + 1));
+          orco = material != nullptr &&
+                 options.graph_generated.count(
+                     DEG_get_original_id(&material->id)->name + 2) != 0;
+        }
+        if (orco && !orco_derivable(object, *mesh_eval)) {
+          orco = false;
+          unreached(name + ": its material graph reads Generated coordinates, which Blender "
+                           "interpolates through modifiers that change topology; they are "
+                           "drawn from the evaluated mesh");
+        }
+        const auto held_orco = g_session.geometry_orco.find(geometry_key);
+        orco_flipped = held_orco == g_session.geometry_orco.end() ? orco :
+                                                                     held_orco->second != orco;
+        g_session.geometry_orco[geometry_key] = orco;
+      }
+      const bool moved = orco_flipped || geometry_dirty.count(original) ||
                          geometry_dirty.count(mesh_original) ||
                          (object->data != nullptr &&
                           geometry_dirty.count(DEG_get_original_id(static_cast<ID *>(object->data))));
@@ -1988,7 +2253,10 @@ static std::string export_frame(const char *options_json)
           meshes_json += ",\"unchanged\":true}";
         }
         else {
-          write_mesh(meshes_json, *mesh_eval, revision);
+          write_mesh(meshes_json,
+                     *mesh_eval,
+                     revision,
+                     orco ? deformed_orco(object) : Array<float3>());
         }
       }
     }
@@ -2142,13 +2410,13 @@ static std::string export_frame(const char *options_json)
       images[texture.image_name] = {texture.image,
                                     entry.remap ? *entry.remap : RoughnessRemap()};
       if (repainted.insert(texture.image).second && image_pixels_changed(texture.image)) {
-        g_session.id_revision[&texture.image->id] += 1;
+        g_session.id_revision[texture.image->id.session_uid] = ++g_session.revision_clock;
       }
-      texture.image_revision = g_session.id_revision[&texture.image->id];
-      if (texture.image_revision == 0) {
-        texture.image_revision = 1;
-        g_session.id_revision[&texture.image->id] = 1;
+      long long &held = g_session.id_revision[texture.image->id.session_uid];
+      if (held == 0) {
+        held = ++g_session.revision_clock;
       }
+      texture.image_revision = held;
     }
     if (!first_material) {
       materials_json += ",";
@@ -2272,23 +2540,23 @@ static std::string export_frame(const char *options_json)
     }
     images.emplace(name, std::make_pair(image, RoughnessRemap()));
     if (repainted.insert(image).second && image_pixels_changed(image)) {
-      g_session.id_revision[&image->id] += 1;
+      g_session.id_revision[image->id.session_uid] = ++g_session.revision_clock;
     }
-    if (g_session.id_revision[&image->id] == 0) {
-      g_session.id_revision[&image->id] = 1;
+    if (g_session.id_revision[image->id.session_uid] == 0) {
+      g_session.id_revision[image->id.session_uid] = ++g_session.revision_clock;
     }
     if (!graph_images_json.empty()) {
       graph_images_json += ",";
     }
     json_escape(graph_images_json, name.c_str());
     graph_images_json += ":";
-    json_int(graph_images_json, g_session.id_revision[&image->id]);
+    json_int(graph_images_json, g_session.id_revision[image->id.session_uid]);
   }
 
   std::string images_json;
   bool first_image = true;
   for (auto &entry : images) {
-    const long long revision = g_session.id_revision[&entry.second.first->id];
+    const long long revision = g_session.id_revision[entry.second.first->id.session_uid];
     const auto known = options.known.find("image:" + entry.first);
     if (known != options.known.end() && known->second == revision) {
       /* The presenter holds these bytes at this revision; a picture it already
