@@ -678,7 +678,24 @@ struct StandardMaterial {
   float transmission = 0.0f;
   /* Principled's own default in 5.2, which is what an unlinked socket reads. */
   float ior = 1.45f;
+  float coat = 0.0f;
+  float coat_roughness = 0.03f;
+  float coat_ior = 1.5f;
+  float coat_tint[4] = {1, 1, 1, 1};
+  float sheen = 0.0f;
+  float sheen_roughness = 0.5f;
+  float sheen_tint[4] = {1, 1, 1, 1};
+  float anisotropy = 0.0f;
+  float anisotropy_rotation = 0.0f;
+  float specular_level = 0.5f;
+  float specular_tint[4] = {1, 1, 1, 1};
+  float film_thickness = 0.0f;
+  float film_ior = 1.33f;
   StandardTexture texture;
+  StandardTexture normal_texture;
+  float normal_strength = 1.0f;
+  bool normal_object_space = false;
+  bool normal_directx = false;
   /* A Roughness image, straight or through a baked linear Map Range; when it
    * is present `roughness` is the multiplier and the reduction sends 1. */
   StandardTexture roughness_texture;
@@ -803,17 +820,13 @@ static void reduce_texture(const Material *material,
   if (node->storage != nullptr) {
     extension = static_cast<const NodeTexImage *>(node->storage)->extension;
   }
-  if (extension == SHD_IMAGE_EXTENSION_CLIP) {
-    unreached(std::string(material->id.name + 2) + ": " + socket_label +
-              " image extension CLIP has no equivalent here; the image repeats instead");
-    extension = SHD_IMAGE_EXTENSION_REPEAT;
-  }
   out.present = true;
   out.image = reinterpret_cast<Image *>(node->id);
   out.image_name = std::string(node->id->name + 2);
   out.uv = texture_uv_map(tree, node);
   out.extension = extension == SHD_IMAGE_EXTENSION_EXTEND  ? "EXTEND" :
                   extension == SHD_IMAGE_EXTENSION_MIRROR ? "MIRROR" :
+                  extension == SHD_IMAGE_EXTENSION_CLIP   ? "CLIP" :
                                                             "REPEAT";
   out.has_tint = has_tint;
   for (int i = 0; i < 3; i++) {
@@ -1074,7 +1087,17 @@ static StandardMaterial reduce_material(const Material *material)
     float *target;
   } const carried[] = {{"Metallic", &out.metallic},
                        {"Transmission Weight", &out.transmission},
-                       {"IOR", &out.ior}};
+                       {"IOR", &out.ior},
+                       {"Coat Weight", &out.coat},
+                       {"Coat Roughness", &out.coat_roughness},
+                       {"Coat IOR", &out.coat_ior},
+                       {"Sheen Weight", &out.sheen},
+                       {"Sheen Roughness", &out.sheen_roughness},
+                       {"Anisotropic", &out.anisotropy},
+                       {"Anisotropic Rotation", &out.anisotropy_rotation},
+                       {"Specular IOR Level", &out.specular_level},
+                       {"Thin Film Thickness", &out.film_thickness},
+                       {"Thin Film IOR", &out.film_ior}};
   for (const auto &entry : carried) {
     const bNodeSocket *socket = find_input(bsdf, entry.socket);
     if (socket != nullptr) {
@@ -1086,6 +1109,15 @@ static StandardMaterial reduce_material(const Material *material)
                 "what is drawn");
     }
   }
+  for (const auto &entry : {std::pair<const char *, float *>{"Coat Tint", out.coat_tint},
+                           {"Sheen Tint", out.sheen_tint},
+                           {"Specular Tint", out.specular_tint}})
+  {
+    socket_rgba(find_input(bsdf, entry.first), entry.second);
+    if (incoming(tree, bsdf, entry.first) != nullptr) {
+      unreached(out.name + ": Principled " + entry.first + " is linked; only its constant is drawn");
+    }
+  }
   /* ROUGHNESS: a constant, or a picture (optionally through a baked linear
    * Map Range). */
   const bNodeLink *roughness_link = incoming(tree, bsdf, "Roughness");
@@ -1094,6 +1126,27 @@ static StandardMaterial reduce_material(const Material *material)
   }
   else {
     reduce_roughness(material, tree, roughness_link->fromnode, out);
+  }
+  const bNodeLink *normal_link = incoming(tree, bsdf, "Normal");
+  if (normal_link != nullptr && normal_link->fromnode != nullptr) {
+    const bNode *normal = normal_link->fromnode;
+    const NodeShaderNormalMap *settings = STREQ(normal->idname, "ShaderNodeNormalMap") ?
+        static_cast<const NodeShaderNormalMap *>(normal->storage) : nullptr;
+    if (settings != nullptr && (settings->space == SHD_SPACE_TANGENT || settings->space == SHD_SPACE_OBJECT)) {
+      const bNodeLink *image = incoming(tree, normal, "Color");
+      if (image != nullptr && image->fromnode != nullptr) {
+        reduce_texture(material, tree, image->fromnode, "Normal Map Color", out.normal_texture);
+      }
+      out.normal_strength = socket_float(find_input(normal, "Strength"), 1.0f);
+      out.normal_object_space = settings->space == SHD_SPACE_OBJECT;
+      out.normal_directx = settings->convention == SHD_NORMAL_MAP_CONVENTION_DIRECTX;
+      if (incoming(tree, normal, "Strength") != nullptr) {
+        unreached(out.name + ": Normal Map Strength is linked; only its constant is drawn");
+      }
+    }
+    else {
+      unreached(out.name + ": Normal requires a tangent/object-space Normal Map; received " + normal->idname);
+    }
   }
   /* PRINCIPLED EMISSION: a constant colour and strength become `emissive`; a
    * strength of 0 (the default) is nothing to carry. */
@@ -1462,6 +1515,11 @@ static void write_mesh(std::string &out, const Mesh &mesh, const long long revis
   }
 
   const ColumnRef co_ref = arena_write(co.data(), co.size() * 4, "f32", size_t(nv), 3);
+  /* Evaluated normals are Blender's, including smooth fans, sharp edges and
+   * custom normals. UV splits in the presenter must not recompute them. */
+  const Span<float3> corner_normals = mesh.corner_normals();
+  const ColumnRef corner_normal_ref = arena_write(
+      corner_normals.data(), corner_normals.size() * sizeof(float3), "f32", size_t(nc), 3);
   const ColumnRef vert_select_ref = flag_column(
       attributes, ".select_vert", bke::AttrDomain::Point, nv, false);
   const ColumnRef vert_hide_ref = flag_column(
@@ -1615,6 +1673,7 @@ static void write_mesh(std::string &out, const Mesh &mesh, const long long revis
   out += ",\"columns\":{";
   bool first = true;
   json_column(out, "co", co_ref, first);
+  json_column(out, "cornerNormal", corner_normal_ref, first);
   json_column(out, "faceStart", face_start_ref, first);
   json_column(out, "corner", corner_ref, first);
   json_column(out, "cornerEdge", corner_edge_ref, first);
@@ -2018,6 +2077,7 @@ static std::string export_frame(const char *options_json)
       StandardTexture *texture;
       const RoughnessRemap *remap;
     } const wanted[] = {{&material.texture, nullptr},
+                        {&material.normal_texture, nullptr},
                         {&material.roughness_texture, &material.roughness_remap}};
     for (const auto &entry : wanted) {
       StandardTexture &texture = *entry.texture;
@@ -2057,7 +2117,42 @@ static std::string export_frame(const char *options_json)
     json_float(materials_json, material.transmission);
     materials_json += ",\"ior\":";
     json_float(materials_json, material.ior);
+    materials_json += ",\"physical\":{";
+    bool first_physical = true;
+    for (const auto &value : {std::pair<const char *, float>{"coat", material.coat},
+                             {"coat_roughness", material.coat_roughness},
+                             {"coat_ior", material.coat_ior},
+                             {"sheen", material.sheen},
+                             {"sheen_roughness", material.sheen_roughness},
+                             {"anisotropy", material.anisotropy},
+                             {"anisotropy_rotation", material.anisotropy_rotation},
+                             {"specular_level", material.specular_level},
+                             {"film_thickness", material.film_thickness},
+                             {"film_ior", material.film_ior}})
+    {
+      if (!first_physical) materials_json += ",";
+      first_physical = false;
+      json_escape(materials_json, value.first);
+      materials_json += ":";
+      json_float(materials_json, value.second);
+    }
+    for (const auto &value : {std::pair<const char *, const float *>{"coat_tint", material.coat_tint},
+                             {"sheen_tint", material.sheen_tint},
+                             {"specular_tint", material.specular_tint}})
+    {
+      materials_json += ",";
+      json_escape(materials_json, value.first);
+      materials_json += ":[";
+      for (int i = 0; i < 3; i++) {
+        if (i) materials_json += ",";
+        json_float(materials_json, value.second[i]);
+      }
+      materials_json += "]";
+    }
+    materials_json += "}";
     for (const auto &named : {std::pair<const char *, const StandardTexture *>{
+                                  "normal_texture", &material.normal_texture},
+                              std::pair<const char *, const StandardTexture *>{
                                   "texture", &material.texture},
                               std::pair<const char *, const StandardTexture *>{
                                   "roughness_texture", &material.roughness_texture}})
@@ -2088,6 +2183,12 @@ static std::string export_frame(const char *options_json)
       }
       materials_json += "}";
     }
+    materials_json += ",\"normal_strength\":";
+    json_float(materials_json, material.normal_strength);
+    materials_json += ",\"normal_space\":";
+    json_escape(materials_json, material.normal_object_space ? "OBJECT" : "TANGENT");
+    materials_json += ",\"normal_directx\":";
+    materials_json += material.normal_directx ? "true" : "false";
     if (material.has_emission) {
       materials_json += ",\"emission\":{\"color\":[";
       for (int i = 0; i < 3; i++) {
