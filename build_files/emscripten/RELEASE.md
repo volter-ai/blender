@@ -1,6 +1,6 @@
 # Headless WebAssembly release
 
-Read this when rebuilding or releasing the Blender engine used by vgai.
+Read this when rebuilding or releasing the Blender engine used by Volter Editor.
 The base is Blender v5.2.0, commit
 `fbe6228777e7d9afefcd61a413844e790ae75db7`. The release manifest must name the
 full fork commit containing this recipe and the source changes. No third-party
@@ -116,7 +116,7 @@ the module factory resolves. Leave `BW_SESSION` unset in the product.
 
 Run runtime/editor verification inside a World containing only the vendors
 actually used. A local engine probe needs no vendor substitution. Use the
-existing vgai model editor and battery, with `VGAI_BLENDER_WASM_DIR` set on the
+existing Volter Editor model editor and battery, with `VOLTER_BLENDER_WASM_DIR` set on the
 editor server to this build's output directory. Preserve its worker, session,
 observer, input catalog and recorded oracles. The musl catalog is
 `packages/blender-engine/bench/battery/scenes/catalog-musl.json`; its five
