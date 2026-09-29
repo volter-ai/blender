@@ -63,7 +63,13 @@ color libraries, TIFF, PNG, JPEG, fmt and robin-map; its only source patch is
 ordinary string assignment on Emscripten: OIIO's private libc++ layout shortcut
 corrupts long metadata names on this ABI and makes PNG writes fail. Blender's
 image initialization keeps OIIO on its caller and OpenEXR's worker count at zero,
-matching the browser profile. Manifold and OpenSubdiv use the built oneTBB. PugiXML is not enabled or linked.
+matching the browser profile. Manifold and OpenSubdiv use the built oneTBB. OpenSubdiv's recipe applies
+`deps/opensubdiv-release-stencils.patch`: once Blender has appended each local
+conversion table into its evaluation stencils, the browser releases that scratch
+before building later face-varying channels. Coefficients, evaluation order,
+subdivision settings and UV channels are unchanged. `TBB_DIR` may select an
+already-built oneTBB when preparing OpenSubdiv in a separate install prefix.
+PugiXML is not enabled or linked.
 
 CPython 3.13.13 builds a complete native helper interpreter and a separate
 static browser-target interpreter. Its upstream wasm config site and explicit

@@ -502,7 +502,7 @@ OpenSubdiv_Evaluator *openSubdiv_createEvaluatorFromTopologyRefiner(
   patch_options.useInfSharpPatch = use_inf_sharp_patch;
   patch_options.generateFVarTables = has_face_varying_data;
   patch_options.generateFVarLegacyLinearPatches = false;
-  const PatchTable *patch_table = PatchTableFactory::Create(*refiner, patch_options);
+  PatchTable *patch_table = PatchTableFactory::Create(*refiner, patch_options);
   // Append local points stencils.
   // Point stencils.
   const StencilTable *local_point_stencil_table = patch_table->GetLocalPointStencilTable();
@@ -514,6 +514,11 @@ OpenSubdiv_Evaluator *openSubdiv_createEvaluatorFromTopologyRefiner(
       return nullptr;
     }
     vertex_stencils = table;
+#ifdef __EMSCRIPTEN__
+    // The appended table owns the same coefficients now. Retaining the local
+    // conversion table overlaps every subsequent face-varying append.
+    patch_table->ReleaseLocalPointStencilTable();
+#endif
   }
   // Varying stencils.
   if (has_varying_data) {
@@ -524,6 +529,9 @@ OpenSubdiv_Evaluator *openSubdiv_createEvaluatorFromTopologyRefiner(
           *refiner, varying_stencils, local_point_varying_stencil_table);
       delete_stencil_table(varying_stencils);
       varying_stencils = table;
+#ifdef __EMSCRIPTEN__
+      patch_table->ReleaseLocalPointVaryingStencilTable();
+#endif
     }
   }
   for (int face_varying_channel = 0; face_varying_channel < num_face_varying_channels;
@@ -537,6 +545,9 @@ OpenSubdiv_Evaluator *openSubdiv_createEvaluatorFromTopologyRefiner(
     if (table != nullptr) {
       delete_stencil_table(all_face_varying_stencils[face_varying_channel]);
       all_face_varying_stencils[face_varying_channel] = table;
+#ifdef __EMSCRIPTEN__
+      patch_table->ReleaseLocalPointFaceVaryingStencilTable(face_varying_channel);
+#endif
     }
   }
   // Create OpenSubdiv's CPU side evaluator.

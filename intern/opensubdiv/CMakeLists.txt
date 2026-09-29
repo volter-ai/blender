@@ -141,6 +141,10 @@ else()
 endif()
 
 blender_add_lib(bf_intern_opensubdiv "${SRC}" "${INC}" "${INC_SYS}" "${LIB}")
+if(EMSCRIPTEN AND WITH_OPENSUBDIV)
+  # An explicitly selected dependency must precede the general dependency root.
+  target_include_directories(bf_intern_opensubdiv SYSTEM BEFORE PRIVATE ${OPENSUBDIV_INCLUDE_DIRS})
+endif()
 
 # Tests.
 

@@ -1,0 +1,42 @@
+--- a/opensubdiv/far/patchTable.h
++++ b/opensubdiv/far/patchTable.h
+@@ -141,6 +141,12 @@
+     ///
+ 
+     /// \brief Returns the number of local vertex points.
++    // Discard conversion scratch after a consumer has appended it to its own
++    // evaluation stencils. Patch indices and patch parameters are unchanged.
++    void ReleaseLocalPointStencilTable();
++    void ReleaseLocalPointVaryingStencilTable();
++    void ReleaseLocalPointFaceVaryingStencilTable(int channel);
++
+     int GetNumLocalPoints() const;
+ 
+     /// \brief Returns the stencil table to compute local point vertex values
+--- a/opensubdiv/far/patchTable.cpp
++++ b/opensubdiv/far/patchTable.cpp
+@@ -81,6 +81,24 @@
+             }
+         }
+     }
++}
++
++void PatchTable::ReleaseLocalPointStencilTable() {
++    if (_vertexPrecisionIsDouble) delete _localPointStencils.Get<double>();
++    else delete _localPointStencils.Get<float>();
++    _localPointStencils.Set();
++}
++
++void PatchTable::ReleaseLocalPointVaryingStencilTable() {
++    if (_varyingPrecisionIsDouble) delete _localPointVaryingStencils.Get<double>();
++    else delete _localPointVaryingStencils.Get<float>();
++    _localPointVaryingStencils.Set();
++}
++
++void PatchTable::ReleaseLocalPointFaceVaryingStencilTable(int channel) {
++    if (_faceVaryingPrecisionIsDouble) delete _localPointFaceVaryingStencils[channel].Get<double>();
++    else delete _localPointFaceVaryingStencils[channel].Get<float>();
++    _localPointFaceVaryingStencils[channel].Set();
+ }
+ 
+ PatchTable::~PatchTable() {

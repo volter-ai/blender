@@ -16,6 +16,14 @@ if (( available_kb < 25 * 1024 * 1024 )); then
   exit 75
 fi
 
+# Source-owned dependency change; refuse an unexpected upstream revision.
+patch_file="$(dirname "$0")/opensubdiv-release-stencils.patch"
+if patch -d "$source_dir" -p1 --dry-run --forward < "$patch_file" >/dev/null 2>&1; then
+  patch -d "$source_dir" -p1 --forward < "$patch_file"
+else
+  patch -d "$source_dir" -p1 --dry-run --reverse < "$patch_file" >/dev/null
+fi
+
 emcmake cmake -S "$source_dir" -B "$build_dir" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX="$install_prefix" \
@@ -45,7 +53,7 @@ emcmake cmake -S "$source_dir" -B "$build_dir" -G Ninja \
   -DNO_GLEW=ON \
   -DNO_GLFW=ON \
   -DNO_GLFW_X11=ON \
-  -DTBB_DIR="$install_prefix/lib/cmake/TBB"
+  -DTBB_DIR="${TBB_DIR:-$install_prefix/lib/cmake/TBB}"
 
 nice -n 19 cmake --build "$build_dir" --parallel 6
 nice -n 19 cmake --install "$build_dir"
