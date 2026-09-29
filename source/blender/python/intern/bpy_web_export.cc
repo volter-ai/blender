@@ -71,6 +71,7 @@
 
 #ifdef __EMSCRIPTEN__
 #  include <emscripten/heap.h>
+#  include <malloc.h>
 #endif
 
 #include "MEM_guardedalloc.h"
@@ -117,6 +118,8 @@
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
 #include "BKE_scene.hh"
+#include "BKE_subdiv.hh"
+#include "BKE_subdiv_modifier.hh"
 
 #include "IMB_imbuf_types.hh"
 
@@ -1460,6 +1463,32 @@ static bool image_pixels_changed(Image *image)
 /** \name The frame
  * \{ */
 
+/**
+ * LET GO OF BLENDER'S CPU SUBDIVISION DESCRIPTOR once the subdivided mesh exists. A Subdivision
+ * Surface evaluated through the mesh wrapper keeps its descriptor (`SubsurfRuntimeData::subdiv_cpu`:
+ * the topology refiner and the OpenSubdiv evaluator with its stencil tables) so the next evaluation
+ * of the same topology is quick; the subdivided mesh itself is `runtime->mesh_eval` and does not
+ * need it. On a limit surface over an all-triangle mesh that descriptor is gigabytes: MEASURED in
+ * the tab, the Stoneguard file's 5,664-vertex "Dwarf | Anatomical head and arms" left malloc's
+ * in-use 1.77 GB higher after its evaluated mesh was read, and its twin head a further 0.95 GB,
+ * which is what ran the 4 GiB heap out. Freed, the next evaluation rebuilds it
+ * (`BKE_subsurf_modifier_subdiv_descriptor_ensure` from null), computing what it computed before;
+ * what is given up is that evaluation's speed, not its result.
+ */
+static void release_subdivision_descriptor(const Object *object)
+{
+  Mesh *wrapper = BKE_object_get_evaluated_mesh_no_subsurf(object);
+  if (wrapper == nullptr || wrapper->runtime->wrapper_type != ME_WRAPPER_TYPE_SUBD) {
+    return;
+  }
+  SubsurfRuntimeData *runtime_data = wrapper->runtime->subsurf_runtime_data;
+  if (runtime_data == nullptr || runtime_data->subdiv_cpu == nullptr) {
+    return;
+  }
+  bke::subdiv::free(runtime_data->subdiv_cpu);
+  runtime_data->subdiv_cpu = nullptr;
+}
+
 static const char *object_type_name(const short type)
 {
   switch (type) {
@@ -2376,6 +2405,7 @@ static std::string export_frame(const char *options_json)
      * own. */
     std::string geometry_key;
     Mesh *mesh_eval = BKE_object_get_evaluated_mesh(object);
+    release_subdivision_descriptor(object);
     if (mesh_eval != nullptr) {
       const ID *mesh_original = DEG_get_original_id(&mesh_eval->id);
       const bool is_datablock = (object->data != nullptr) &&
@@ -2991,6 +3021,12 @@ static PyObject *py_memory(PyObject * /*self*/, PyObject * /*args*/)
   put("arenaCapacity", (unsigned long long)blender::web_export::g_arena.capacity());
 #ifdef __EMSCRIPTEN__
   put("heap", (unsigned long long)emscripten_get_heap_size());
+  /* THE ALLOCATOR'S OWN ACCOUNT, which the heap's size cannot give: the heap never shrinks, so
+   * after a transient peak only `malloc` knows how much of it is still held (`uordblks`) and how
+   * much is free for reuse (`fordblks`). Everything allocates through it, guarded or not. */
+  const struct mallinfo info = mallinfo();
+  put("mallocInUse", (unsigned long long)(size_t)info.uordblks);
+  put("mallocFree", (unsigned long long)(size_t)info.fordblks);
 #endif
   return out;
 }
