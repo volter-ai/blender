@@ -134,9 +134,16 @@ subdiv::Subdiv *BKE_subsurf_modifier_subdiv_descriptor_ensure(SubsurfRuntimeData
     return runtime_data->subdiv_gpu = subdiv::update_from_mesh(
                runtime_data->subdiv_gpu, &runtime_data->settings, mesh);
   }
+#ifdef __EMSCRIPTEN__
+  /* CPU callers already free descriptors not held by the runtime after tessellation/deformation.
+   * Keep the evaluated mesh, but do not retain its OpenSubdiv tables in the bounded browser heap.
+   * Releasing them at export is too late: non-final modifiers tessellate during depsgraph eval. */
+  return subdiv::update_from_mesh(nullptr, &runtime_data->settings, mesh);
+#else
   runtime_data->used_cpu = 2;
   return runtime_data->subdiv_cpu = subdiv::update_from_mesh(
              runtime_data->subdiv_cpu, &runtime_data->settings, mesh);
+#endif
 }
 
 int BKE_subsurf_modifier_eval_required_mode(bool is_final_render, bool is_edit_mode)

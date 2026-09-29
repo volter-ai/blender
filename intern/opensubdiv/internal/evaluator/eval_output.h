@@ -7,6 +7,8 @@
 #ifndef OPENSUBDIV_EVAL_OUTPUT_H_
 #define OPENSUBDIV_EVAL_OUTPUT_H_
 
+#include <type_traits>
+
 #include <opensubdiv/osd/cpuPatchTable.h>
 #include <opensubdiv/osd/mesh.h>
 #include <opensubdiv/osd/types.h>
@@ -182,6 +184,31 @@ class ConstPatchCoordWrapperBuffer : public RawDataWrapperVertexBuffer<const Pat
 bool is_adaptive(const CpuPatchTable *patch_table);
 bool is_adaptive(const GPUPatchTable *patch_table);
 
+/* CPU evaluators use Far's tables directly. Adopt them instead of cloning the tables only to
+ * delete the originals immediately after construction. GPU evaluators convert to their own
+ * representation, so their caller still owns the Far tables. */
+template<typename Table, typename Context>
+static const Table *acquire_stencil_table(const StencilTable *table, Context *context)
+{
+  if constexpr (std::is_same_v<Table, StencilTable>) {
+    return table;
+  }
+  else {
+    return OpenSubdiv::Osd::convertToCompatibleStencilTable<Table>(table, context);
+  }
+}
+
+template<typename Table> static void delete_stencil_table(const Table *table)
+{
+  if constexpr (std::is_same_v<Table, StencilTable>) {
+    /* Far factories return a StencilTableReal<float> disguised as its derived StencilTable. */
+    delete reinterpret_cast<const OpenSubdiv::Far::StencilTableReal<float> *>(table);
+  }
+  else {
+    delete table;
+  }
+}
+
 template<typename EVAL_VERTEX_BUFFER,
          typename STENCIL_TABLE,
          typename PATCH_TABLE,
@@ -203,20 +230,19 @@ class FaceVaryingVolatileEval {
         evaluator_cache_(evaluator_cache),
         device_context_(device_context)
   {
-    using OpenSubdiv::Osd::convertToCompatibleStencilTable;
     num_coarse_face_varying_vertices_ = face_varying_stencils->GetNumControlVertices();
     const int num_total_face_varying_vertices = face_varying_stencils->GetNumControlVertices() +
                                                 face_varying_stencils->GetNumStencils();
     src_face_varying_data_ = EVAL_VERTEX_BUFFER::Create(
         2, num_total_face_varying_vertices, device_context);
-    face_varying_stencils_ = convertToCompatibleStencilTable<STENCIL_TABLE>(face_varying_stencils,
-                                                                            device_context_);
+    face_varying_stencils_ = acquire_stencil_table<STENCIL_TABLE>(face_varying_stencils,
+                                                                device_context_);
   }
 
   ~FaceVaryingVolatileEval()
   {
     delete src_face_varying_data_;
-    delete face_varying_stencils_;
+    delete_stencil_table(face_varying_stencils_);
   }
 
   void updateData(const float *src, int start_vertex, int num_vertices)
@@ -354,14 +380,11 @@ class VolatileEvalOutput : public EvalOutputAPI::EvalOutput {
     int num_total_vertices = vertex_stencils->GetNumControlVertices() +
                              vertex_stencils->GetNumStencils();
     num_coarse_vertices_ = vertex_stencils->GetNumControlVertices();
-    using OpenSubdiv::Osd::convertToCompatibleStencilTable;
     src_data_ = SRC_VERTEX_BUFFER::Create(3, num_total_vertices, device_context_);
     src_varying_data_ = SRC_VERTEX_BUFFER::Create(3, num_total_vertices, device_context_);
     patch_table_ = PATCH_TABLE::Create(patch_table, device_context_);
-    vertex_stencils_ = convertToCompatibleStencilTable<STENCIL_TABLE>(vertex_stencils,
-                                                                      device_context_);
-    varying_stencils_ = convertToCompatibleStencilTable<STENCIL_TABLE>(varying_stencils,
-                                                                       device_context_);
+    vertex_stencils_ = acquire_stencil_table<STENCIL_TABLE>(vertex_stencils, device_context_);
+    varying_stencils_ = acquire_stencil_table<STENCIL_TABLE>(varying_stencils, device_context_);
 
     // Create evaluators for every face varying channel.
     face_varying_evaluators_.reserve(all_face_varying_stencils.size());
@@ -383,8 +406,8 @@ class VolatileEvalOutput : public EvalOutputAPI::EvalOutput {
     delete src_varying_data_;
     delete src_vertex_data_;
     delete patch_table_;
-    delete vertex_stencils_;
-    delete varying_stencils_;
+    delete_stencil_table(vertex_stencils_);
+    delete_stencil_table(varying_stencils_);
     for (FaceVaryingEval *face_varying_evaluator : face_varying_evaluators_) {
       delete face_varying_evaluator;
     }

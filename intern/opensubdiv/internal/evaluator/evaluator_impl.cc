@@ -570,11 +570,13 @@ OpenSubdiv_Evaluator *openSubdiv_createEvaluatorFromTopologyRefiner(
   evaluator->eval_output = new blender::opensubdiv::EvalOutputAPI(eval_output, patch_map);
   evaluator->patch_map = patch_map;
   evaluator->patch_table = patch_table;
-  // TODO(sergey): Look into whether we've got duplicated stencils arrays.
-  delete_stencil_table(vertex_stencils);
-  delete_stencil_table(varying_stencils);
-  for (const StencilTable *table : all_face_varying_stencils) {
-    delete_stencil_table(table);
+  // The CPU evaluator adopted these tables; the GPU evaluator converted them.
+  if (use_gpu_evaluator) {
+    delete_stencil_table(vertex_stencils);
+    delete_stencil_table(varying_stencils);
+    for (const StencilTable *table : all_face_varying_stencils) {
+      delete_stencil_table(table);
+    }
   }
 
   return evaluator;

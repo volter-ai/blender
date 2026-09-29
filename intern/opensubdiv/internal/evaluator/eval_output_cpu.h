@@ -27,6 +27,7 @@ class CpuEvalOutput : public VolatileEvalOutput<CpuVertexBuffer,
                                                 CpuPatchTable,
                                                 CpuEvaluator> {
  public:
+  /* Takes ownership of the vertex, varying and face-varying stencil tables. */
   CpuEvalOutput(const StencilTable *vertex_stencils,
                 const StencilTable *varying_stencils,
                 const std::vector<const StencilTable *> &all_face_varying_stencils,
