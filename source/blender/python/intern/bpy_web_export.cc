@@ -1835,6 +1835,12 @@ static void write_mesh(std::string &out,
   const Span<float3> corner_normals = mesh.corner_normals();
   const ColumnRef corner_normal_ref = arena_write(
       corner_normals.data(), corner_normals.size() * sizeof(float3), "f32", size_t(nc), 3);
+  // The evaluated mesh owns tessellation too. Sending its corner triangles
+  // avoids rebuilding topology and triangulating every polygon in JavaScript.
+  const Span<int3> corner_triangles = mesh.corner_tris();
+  const ColumnRef corner_triangle_ref = arena_write(
+      corner_triangles.data(), corner_triangles.size() * sizeof(int3), "u32",
+      corner_triangles.size(), 3);
   const ColumnRef vert_select_ref = flag_column(
       attributes, ".select_vert", bke::AttrDomain::Point, nv, false);
   const ColumnRef vert_hide_ref = flag_column(
@@ -1989,6 +1995,7 @@ static void write_mesh(std::string &out,
   bool first = true;
   json_column(out, "co", co_ref, first);
   json_column(out, "cornerNormal", corner_normal_ref, first);
+  json_column(out, "cornerTri", corner_triangle_ref, first);
   json_column(out, "orco", orco_ref, first);
   json_column(out, "faceStart", face_start_ref, first);
   json_column(out, "corner", corner_ref, first);
