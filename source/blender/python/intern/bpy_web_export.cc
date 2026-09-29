@@ -141,6 +141,36 @@ static std::vector<uint8_t> g_arena;
  *  outgrown behind in a heap that never shrinks -- measured on a 1.78M-vertex batch: a 404 MB
  *  arena at 510 MB capacity in a 2,156 MB heap whose scene data was 293 MB. */
 static bool g_direct = false;
+
+/** WHERE A FRAME'S MEMORY GOES, said while it goes: the heap only grows, so a reading after the
+ *  call cannot name the part of the call that grew it. Silent unless the heap grew 128 MB since the
+ *  last note, so an ordinary frame prints nothing; the engine's last output then names the stage
+ *  an out-of-memory death reached. MEASURED 2026-09-29 with it: the Stoneguard Bridge scene (game-
+ *  benchmarks 34eb427, its "Stoneguard Bridge" scene active) dies inside DEG_evaluate_on_refresh
+ *  at a 4 GB heap after "before-evaluate heap=2416 inUse=1900"; native Blender's whole-process
+ *  peak evaluating the same scene is 2.17 GB, and -t 1 dies the same way. */
+static void memory_note(const char *stage, const char *detail = "")
+{
+#ifdef __EMSCRIPTEN__
+  static size_t last_heap = 0;
+  const size_t heap = emscripten_get_heap_size();
+  if (heap < last_heap + (size_t(128) << 20)) {
+    return;
+  }
+  last_heap = heap;
+  const struct mallinfo info = mallinfo();
+  fprintf(stderr,
+          "@@VOLTER-MEMORY door %s %s heap=%zu inUse=%zu\n",
+          stage,
+          detail,
+          heap >> 20,
+          size_t(info.uordblks) >> 20);
+  fflush(stderr);
+#else
+  (void)stage;
+  (void)detail;
+#endif
+}
 static std::vector<std::unique_ptr<uint8_t[]>> g_blocks;
 static size_t g_block_bytes = 0;
 /** The answer, owned by the door and valid until the next call. */
@@ -2344,7 +2374,9 @@ static std::string export_frame(const char *options_json)
   if (options.evaluate) {
     BKE_main_view_layers_synced_ensure(resolved.bmain);
     DEG_graph_relations_update(resolved.depsgraph);
+    memory_note("before-evaluate");
     DEG_evaluate_on_refresh(resolved.depsgraph, DEG_EVALUATE_SYNC_WRITEBACK_YES);
+    memory_note("evaluated");
   }
 
   /* OUR OWN evaluation's record, added to everything the callback already
@@ -2395,6 +2427,7 @@ static std::string export_frame(const char *options_json)
     if (object == nullptr) {
       continue;
     }
+    memory_note("object", object->id.name + 2);
     const ID *original = DEG_get_original_id(&object->id);
     const std::string name(object->id.name + 2);
 
