@@ -1,0 +1,30 @@
+--- a/opensubdiv/osd/cpuKernel.cpp
++++ b/opensubdiv/osd/cpuKernel.cpp
+@@ -38,7 +38,7 @@
+     assert(src && dst);
+     src = elementAtIndex(src, srcIndex, desc);
+     for (int k = 0; k < desc.length; ++k) {
+-        dst[k] += src[k] * weight;
++        dst[k] = std::fma(src[k], weight, dst[k]);
+     }
+ }
+ 
+--- a/opensubdiv/osd/cpuEvaluator.cpp
++++ b/opensubdiv/osd/cpuEvaluator.cpp
+@@ -10,6 +10,7 @@
+ #include "../osd/patchBasis.h"
+ 
+ #include <cstdlib>
++#include <cmath>
+ 
+ namespace OpenSubdiv {
+ namespace OPENSUBDIV_VERSION {
+@@ -117,7 +118,7 @@
+     void AddWithWeight(T const *src, float w) {
+         if (_p) {
+             for (int i = 0; i < _length; ++i) {
+-                _p[i] += src[i] * w;
++                _p[i] = std::fma(src[i], w, _p[i]);
+             }
+         }
+     }

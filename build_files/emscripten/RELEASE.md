@@ -118,6 +118,39 @@ The preload list and exclusions are in the same CMake file. The browser
 consumer calls `releasePreloadedFileData` after session ready, not merely after
 the module factory resolves. Leave `BW_SESSION` unset in the product.
 
+## Native arithmetic profile
+
+The reference for matrix inversion and subdivision is the Blender 5.2 arm64
+macOS release, with round-to-nearest and gradual underflow. The browser matrix
+translation units enable Eigen's four-lane path. `math/eigen_native_math.hh`
+implements NEON reciprocal estimation and two refinement steps using the
+portable integer-significand implementation in `math/arm_reciprocal.hh`.
+It covers signed zero, infinities, NaNs and subnormals as well as normal values.
+NaN payload identity is not part of the reference contract.
+
+`deps/opensubdiv-native-math.patch` makes the generic CPU stencil and patch
+evaluator accumulation explicitly fused. The templated kernels remain unchanged: fusing them too
+changes the native result. No global fast-math option is enabled. Scratch-table
+release and subdivision level do not change this arithmetic profile.
+
+Run these commands inside the verification World on an arm64 host, with the
+SDK activated, to compare native intrinsics with the portable Wasm result:
+
+```bash
+clang++ -std=c++20 -O2 -ffp-contract=off \
+  build_files/emscripten/math/reciprocal_test.cc -o /tmp/reciprocal-native
+/tmp/reciprocal-native
+em++ -std=c++20 -O2 -ffp-contract=off -sENVIRONMENT=node \
+  build_files/emscripten/math/reciprocal_test.cc -o /tmp/reciprocal-wasm.cjs
+node /tmp/reciprocal-wasm.cjs
+```
+
+Both must report `1393215 reciprocal cases; digest=31221d83`. These cover
+estimate-bin boundaries, both signs and all exponents, plus one million
+repeatable full-bit-pattern inputs. This arithmetic test is separate from the
+scene-level geometry comparison; it does not claim every Blender operation on
+every platform is bit-identical.
+
 ## Verification and packaging
 
 Run runtime/editor verification inside a World containing only the vendors

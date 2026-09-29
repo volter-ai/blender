@@ -16,13 +16,17 @@ if (( available_kb < 25 * 1024 * 1024 )); then
   exit 75
 fi
 
-# Source-owned dependency change; refuse an unexpected upstream revision.
-patch_file="$(dirname "$0")/opensubdiv-release-stencils.patch"
-if patch -d "$source_dir" -p1 --dry-run --forward < "$patch_file" >/dev/null 2>&1; then
-  patch -d "$source_dir" -p1 --forward < "$patch_file"
-else
-  patch -d "$source_dir" -p1 --dry-run --reverse < "$patch_file" >/dev/null
-fi
+# Source-owned dependency changes. git apply refuses a partial application;
+# platform patch(1) implementations may silently reverse individual hunks.
+patch_dir=$(cd "$(dirname "$0")" && pwd)
+for patch_name in opensubdiv-release-stencils opensubdiv-native-math; do
+  patch_file="$patch_dir/$patch_name.patch"
+  if (cd "$source_dir" && git apply --check "$patch_file") 2>/dev/null; then
+    (cd "$source_dir" && git apply "$patch_file")
+  else
+    (cd "$source_dir" && git apply --reverse --check "$patch_file")
+  fi
+done
 
 emcmake cmake -S "$source_dir" -B "$build_dir" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \

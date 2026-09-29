@@ -2,6 +2,13 @@
 #
 # SPDX-License-Identifier: GPL-2.0-or-later
 
+# Match the vector reduction and reciprocal rounding used by native arm64.
+if(EMSCRIPTEN)
+  set_source_files_properties(intern/math_matrix.cc PROPERTIES COMPILE_OPTIONS
+    "-msimd128;-msse2;-include;${CMAKE_SOURCE_DIR}/build_files/emscripten/math/eigen_native_math.hh")
+  set_source_files_properties(intern/math_matrix_c.cc PROPERTIES COMPILE_OPTIONS "-msimd128;-msse2")
+endif()
+
 if(HAVE_EXECINFO_H)
   add_definitions(-DHAVE_EXECINFO_H)
 endif()

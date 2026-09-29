@@ -28,3 +28,8 @@ set(LIB
 )
 
 blender_add_lib(bf_intern_eigen "${SRC}" "${INC}" "${INC_SYS}" "${LIB}")
+
+if(EMSCRIPTEN)
+  set_source_files_properties(intern/matrix.cc PROPERTIES COMPILE_OPTIONS
+    "-msimd128;-msse2;-include;${CMAKE_SOURCE_DIR}/build_files/emscripten/math/eigen_native_math.hh")
+endif()
