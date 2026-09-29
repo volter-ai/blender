@@ -63,10 +63,17 @@
 #include <cstdio>
 #include <algorithm>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+#ifdef __EMSCRIPTEN__
+#  include <emscripten/heap.h>
+#endif
+
+#include "MEM_guardedalloc.h"
 
 #include "BLI_listbase.h"
 #include "BLI_color.hh"
@@ -125,6 +132,14 @@ namespace blender::web_export {
 
 /** Every column the frame names lives here; the frame holds only offsets. */
 static std::vector<uint8_t> g_arena;
+/** DIRECT COLUMNS: on the browser build, with no `buffer_path`, every column is its own
+ *  exact-size block on the heap and the frame names its heap ADDRESS; the page reads the whole
+ *  heap as the arena (base 0). One contiguous arena grown by insertion left every buffer it had
+ *  outgrown behind in a heap that never shrinks -- measured on a 1.78M-vertex batch: a 404 MB
+ *  arena at 510 MB capacity in a 2,156 MB heap whose scene data was 293 MB. */
+static bool g_direct = false;
+static std::vector<std::unique_ptr<uint8_t[]>> g_blocks;
+static size_t g_block_bytes = 0;
 /** The answer, owned by the door and valid until the next call. */
 static std::string g_frame;
 
@@ -139,6 +154,22 @@ struct ColumnRef {
 
 static ColumnRef arena_write(const void *data, size_t bytes, const char *dtype, size_t count, int stride)
 {
+  if (g_direct) {
+    ColumnRef ref;
+    std::unique_ptr<uint8_t[]> block(new uint8_t[bytes == 0 ? 8 : bytes]);
+    if (bytes != 0) {
+      memcpy(block.get(), data, bytes);
+    }
+    ref.offset = size_t(reinterpret_cast<uintptr_t>(block.get()));
+    ref.length = bytes;
+    ref.dtype = dtype;
+    ref.count = count;
+    ref.stride = stride;
+    ref.present = true;
+    g_block_bytes += bytes;
+    g_blocks.push_back(std::move(block));
+    return ref;
+  }
   while (g_arena.size() % 8 != 0) {
     g_arena.push_back(0);
   }
@@ -2107,6 +2138,16 @@ static std::string export_frame(const char *options_json)
 {
   const Options options = parse_options(options_json);
   g_arena.clear();
+  g_blocks.clear();
+  g_block_bytes = 0;
+#ifdef __EMSCRIPTEN__
+  g_direct = options.buffer_path.empty();
+  if (g_direct) {
+    std::vector<uint8_t>().swap(g_arena);
+  }
+#else
+  g_direct = false;
+#endif
   std::vector<std::string> warnings;
   g_warnings = &warnings;
   ensure_callbacks();
@@ -2653,12 +2694,28 @@ const char *blender_web_export_frame(const char *options_json)
 
 const uint8_t *blender_web_export_buffer()
 {
+  /* Direct columns are named by their heap address, so the arena the page reads is the heap. */
+  if (blender::web_export::g_direct) {
+    return nullptr;
+  }
   return blender::web_export::g_arena.data();
 }
 
 size_t blender_web_export_buffer_size()
 {
+#ifdef __EMSCRIPTEN__
+  if (blender::web_export::g_direct) {
+    return size_t(emscripten_get_heap_size());
+  }
+#endif
   return blender::web_export::g_arena.size();
+}
+
+/** The bytes the last frame's columns came to, whichever way they are held. */
+static size_t shipped_bytes()
+{
+  return blender::web_export::g_direct ? blender::web_export::g_block_bytes :
+                                         blender::web_export::g_arena.size();
 }
 
 void blender_web_export_session_reset()
@@ -2691,6 +2748,12 @@ static PyObject *py_export_frame(PyObject * /*self*/, PyObject *args)
 
 static PyObject *py_buffer(PyObject * /*self*/, PyObject * /*args*/)
 {
+  if (blender::web_export::g_direct) {
+    PyErr_SetString(PyExc_RuntimeError,
+                    "the frame's columns live in the heap at the addresses it names (direct "
+                    "columns); there is no contiguous arena to copy");
+    return nullptr;
+  }
   return PyBytes_FromStringAndSize(
       reinterpret_cast<const char *>(blender_web_export_buffer()),
       Py_ssize_t(blender_web_export_buffer_size()));
@@ -2698,12 +2761,41 @@ static PyObject *py_buffer(PyObject * /*self*/, PyObject * /*args*/)
 
 static PyObject *py_buffer_size(PyObject * /*self*/, PyObject * /*args*/)
 {
-  return PyLong_FromSize_t(blender_web_export_buffer_size());
+  return PyLong_FromSize_t(shipped_bytes());
 }
 
 static PyObject *py_session_reset(PyObject * /*self*/, PyObject * /*args*/)
 {
   blender_web_export_session_reset();
+  Py_RETURN_NONE;
+}
+
+/** WHERE THE ENGINE'S MEMORY IS, read from inside it: Blender's guarded allocator in use and at
+ *  its peak, the export arena's bytes and capacity, and the WebAssembly heap -- which only grows.
+ *  The page sees only the heap, and a heap that grew cannot say what grew it. */
+static PyObject *py_memory(PyObject * /*self*/, PyObject * /*args*/)
+{
+  PyObject *out = PyDict_New();
+  auto put = [&](const char *key, unsigned long long value) {
+    PyObject *number = PyLong_FromUnsignedLongLong(value);
+    PyDict_SetItemString(out, key, number);
+    Py_DECREF(number);
+  };
+  put("guarded", (unsigned long long)MEM_get_memory_in_use());
+  put("guardedPeak", (unsigned long long)MEM_get_peak_memory());
+  put("guardedBlocks", (unsigned long long)MEM_get_memory_blocks_in_use());
+  put("arena", (unsigned long long)shipped_bytes());
+  put("direct", (unsigned long long)blender::web_export::g_direct);
+  put("arenaCapacity", (unsigned long long)blender::web_export::g_arena.capacity());
+#ifdef __EMSCRIPTEN__
+  put("heap", (unsigned long long)emscripten_get_heap_size());
+#endif
+  return out;
+}
+
+static PyObject *py_memory_reset_peak(PyObject * /*self*/, PyObject * /*args*/)
+{
+  MEM_reset_peak_memory();
   Py_RETURN_NONE;
 }
 
@@ -2714,6 +2806,8 @@ static PyMethodDef web_methods[] = {
      "How many bytes the last frame's columns came to -- the accounting number, "
      "without copying them."},
     {"session_reset", py_session_reset, METH_NOARGS, "Forget every revision."},
+    {"memory", py_memory, METH_NOARGS, "Where the engine's memory is (guarded allocator, arena, heap)."},
+    {"memory_reset_peak", py_memory_reset_peak, METH_NOARGS, "Start the guarded peak over."},
     {nullptr, nullptr, 0, nullptr},
 };
 

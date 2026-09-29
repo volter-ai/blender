@@ -200,16 +200,43 @@ class RawWriteWrap : public WriteWrap {
 
  private:
   int file_handle = 0;
+  bool presized = false;
 };
 
 bool RawWriteWrap::open(const char *filepath)
 {
   int file;
 
+#ifdef __EMSCRIPTEN__
+  /* THE BROWSER BUILD'S FILES LIVE IN THE ENGINE'S OWN HEAP (WasmFS, memory backend), a heap
+   * that never shrinks, and a file there is one buffer that doubles as it is written. Saving
+   * `path@` beside `path` held the old document, the new one and the new one's outgrown
+   * buffers at once: measured on a 245 MB document, a save grew the heap 794 MB and the next
+   * one 474 MB more. The document here is the tab's staging copy of a project file whose real
+   * copy is the host's, so the old copy is dropped first and the new file is sized to it once. */
+  size_t previous_size = 0;
+  {
+    const size_t len = strlen(filepath);
+    if (len > 1 && filepath[len - 1] == '@') {
+      std::string original(filepath, len - 1);
+      BLI_stat_t st;
+      if (BLI_stat(original.c_str(), &st) == 0 && st.st_size > 0) {
+        previous_size = size_t(st.st_size);
+        ::remove(original.c_str());
+      }
+    }
+  }
+#endif
+
   file = BLI_open(filepath, O_BINARY + O_WRONLY + O_CREAT + O_TRUNC, 0666);
 
   if (file != -1) {
     file_handle = file;
+#ifdef __EMSCRIPTEN__
+    if (previous_size != 0 && ::ftruncate(file, int64_t(previous_size)) == 0) {
+      presized = true;
+    }
+#endif
     return true;
   }
 
@@ -217,6 +244,15 @@ bool RawWriteWrap::open(const char *filepath)
 }
 bool RawWriteWrap::close()
 {
+#ifdef __EMSCRIPTEN__
+  /* A presized file is cut back to what was written. */
+  if (presized) {
+    const int64_t written = BLI_lseek(file_handle, 0, SEEK_CUR);
+    if (written >= 0) {
+      ::ftruncate(file_handle, written);
+    }
+  }
+#endif
   return (::close(file_handle) != -1);
 }
 bool RawWriteWrap::write(const void *buf, size_t buf_len)
