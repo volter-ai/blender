@@ -555,6 +555,10 @@ struct Session {
 };
 
 static Session g_session;
+/** The depsgraph the last frame was read from. An undo step that restored it (memfile undo with
+ *  `use_old_bmain_data`, `BKE_scene_undo_depsgraphs_restore`) keeps the session; one that replaced
+ *  it does not (`session_undo`). Compared, never read through. */
+static const Depsgraph *g_depsgraph = nullptr;
 /** Warnings already named once, so a refusal is reported per cause and not
  *  per frame. Cleared with the session. */
 static std::unordered_set<std::string> g_warned;
@@ -2299,6 +2303,7 @@ static std::string export_frame(const char *options_json)
     g_warnings = nullptr;
     return "{\"error\":\"no scene\"}";
   }
+  g_depsgraph = resolved.depsgraph;
   /* EVALUATE WITHOUT CLEARING, THEN CLEAR AFTER READING -- the render engine's
    * own pattern, and the only one that can see the update record at all.
    * `BKE_scene_graph_update_tagged` ends with `DEG_ids_clear_recalc`, so a door
@@ -2824,6 +2829,7 @@ extern "C" const char *blender_web_export_frame(const char *options_json);
 extern "C" const uint8_t *blender_web_export_buffer();
 extern "C" size_t blender_web_export_buffer_size();
 extern "C" void blender_web_export_session_reset();
+extern "C" bool blender_web_export_session_undo();
 extern "C" const char *blender_web_export_mesh(const char *options_json);
 
 const char *blender_web_export_mesh(const char *options_json)
@@ -2870,6 +2876,25 @@ static size_t shipped_bytes()
 {
   return blender::web_export::g_direct ? blender::web_export::g_block_bytes :
                                          blender::web_export::g_arena.size();
+}
+
+/**
+ * AN UNDO STEP IS AN ORDINARY UPDATE when Blender kept its datablocks: memfile undo with
+ * `use_old_bmain_data` re-reads only the IDs whose chunks changed, in place, keeps every
+ * `session_uid`, restores the scene's depsgraph and tags exactly the changed IDs for it
+ * (`memfile_undosys_step_decode`), which is how Blender's own viewport redraws only what an undo
+ * changed. The revisions stay, and the next frame re-ships what the tags name. When the step
+ * replaced the depsgraph (a full barrier), nothing recorded before it describes the scene, so the
+ * session starts over. Answers whether it did.
+ */
+bool blender_web_export_session_undo()
+{
+  const blender::web_export::Resolved resolved = blender::web_export::resolve();
+  if (resolved.depsgraph != nullptr && resolved.depsgraph == blender::web_export::g_depsgraph) {
+    return false;
+  }
+  blender_web_export_session_reset();
+  return true;
 }
 
 void blender_web_export_session_reset()
@@ -2936,6 +2961,11 @@ static PyObject *py_buffer_size(PyObject * /*self*/, PyObject * /*args*/)
   return PyLong_FromSize_t(shipped_bytes());
 }
 
+static PyObject *py_session_undo(PyObject * /*self*/, PyObject * /*args*/)
+{
+  return PyBool_FromLong(blender_web_export_session_undo());
+}
+
 static PyObject *py_session_reset(PyObject * /*self*/, PyObject * /*args*/)
 {
   blender_web_export_session_reset();
@@ -2982,6 +3012,8 @@ static PyMethodDef web_methods[] = {
      "How many bytes the last frame's columns came to -- the accounting number, "
      "without copying them."},
     {"session_reset", py_session_reset, METH_NOARGS, "Forget every revision."},
+    {"session_undo", py_session_undo, METH_NOARGS,
+     "After an undo step: keep the revisions if Blender kept the depsgraph; answers whether it reset."},
     {"memory", py_memory, METH_NOARGS, "Where the engine's memory is (guarded allocator, arena, heap)."},
     {"memory_reset_peak", py_memory_reset_peak, METH_NOARGS, "Start the guarded peak over."},
     {nullptr, nullptr, 0, nullptr},
