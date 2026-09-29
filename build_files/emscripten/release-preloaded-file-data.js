@@ -27,6 +27,9 @@ Module['releasePreloadedFileData'] = () => {
   const files = wasmFSPreloadedFiles.length;
   wasmFSPreloadedFiles.length = 0;
   wasmFSPreloadedDirs.length = 0;
-  if (Array.isArray(Module['preRun'])) Module['preRun'].length = 0;
+  // An ASSERTIONS link (`blender_editor_diag`) guards `Module.preRun` with an accessor that aborts
+  // on any touch after startup; its payload is a diagnostic's, left in place.
+  if (!Object.getOwnPropertyDescriptor(Module, 'preRun')?.set && Array.isArray(Module['preRun']))
+    Module['preRun'].length = 0;
   return { files, bytes };
 };

@@ -284,6 +284,12 @@ static void json_column(std::string &out, const char *name, const ColumnRef &ref
  */
 struct Options {
   std::string buffer_path;
+  /** NOTICE, THEN PULL: a changed mesh goes as `{revision, deferred: true}` and its columns are
+   *  written only when the caller asks for that one mesh (`export_mesh`), so one call never holds
+   *  every changed mesh's columns at once. */
+  bool defer = false;
+  /** The geometry key `export_mesh` writes. */
+  std::string key;
   /** The caller's session name, echoed as the frame's `session`. */
   std::string session;
   bool evaluate = true;
@@ -448,6 +454,16 @@ static Options parse_options(const char *options_json)
     if (key == "evaluate") {
       options.evaluate = (strncmp(value, "true", 4) == 0);
       c = value;
+      continue;
+    }
+    if (key == "defer") {
+      options.defer = (strncmp(value, "true", 4) == 0);
+      c = value;
+      continue;
+    }
+    if (key == "key" && *value == '"') {
+      const char *end = read_string(value, options.key);
+      c = end ? end : value + 1;
       continue;
     }
     if (key == "graph_materials") {
@@ -2134,9 +2150,28 @@ static void write_matrix(std::string &out, const float4x4 &matrix)
   out += "]";
 }
 
-static std::string export_frame(const char *options_json)
+/** A mesh the last frame named and did not write: what `export_mesh` needs to write it. Valid until
+ *  the next `export_frame`, which is also the next evaluation -- the evaluated mesh it points at
+ *  lives exactly that long. */
+struct DeferredMesh {
+  const Object *object = nullptr;
+  const Mesh *mesh = nullptr;
+  bool orco = false;
+  long long revision = 0;
+};
+static std::unordered_map<std::string, DeferredMesh> g_deferred;
+
+/** A picture the last frame named and did not write (`export_image`). */
+struct DeferredImage {
+  Image *image = nullptr;
+  long long revision = 0;
+  RoughnessRemap remap;
+};
+static std::unordered_map<std::string, DeferredImage> g_deferred_images;
+
+/** Free the last call's columns: each call's columns live until the next call. */
+static void arena_reset(const Options &options)
 {
-  const Options options = parse_options(options_json);
   g_arena.clear();
   g_blocks.clear();
   g_block_bytes = 0;
@@ -2148,6 +2183,108 @@ static std::string export_frame(const char *options_json)
 #else
   g_direct = false;
 #endif
+}
+
+static void arena_flush(const Options &options)
+{
+  if (!options.buffer_path.empty()) {
+    FILE *file = fopen(options.buffer_path.c_str(), "wb");
+    if (file != nullptr) {
+      if (!g_arena.empty()) {
+        fwrite(g_arena.data(), 1, g_arena.size(), file);
+      }
+      fclose(file);
+    }
+  }
+}
+
+/**
+ * ONE DEFERRED MESH'S COLUMNS, the pull half of the frame's notice (Hydra's render delegate pulling
+ * a prim's data sources during Sync, `HydraSceneIndex::populate` emitting only the notice): the
+ * previous call's columns are freed first, so the engine holds one mesh's columns at a time
+ * whatever the scene's size. Answers `{"mesh": <the mesh as the frame would have carried it>,
+ * "warnings": [...]}`, or `{"error": ...}` for a key the last frame did not defer.
+ */
+static std::string export_mesh(const char *options_json)
+{
+  const Options options = parse_options(options_json);
+  arena_reset(options);
+  const auto found = g_deferred.find(options.key);
+  if (found == g_deferred.end()) {
+    std::string out = "{\"error\":";
+    json_escape(out, ("the last frame deferred no mesh '" + options.key + "'").c_str());
+    return out + "}";
+  }
+  const DeferredMesh deferred = found->second;
+  g_deferred.erase(found);
+  std::vector<std::string> warnings;
+  g_warnings = &warnings;
+  std::string out = "{\"mesh\":";
+  write_mesh(out,
+             *deferred.mesh,
+             deferred.revision,
+             deferred.orco ? deformed_orco(deferred.object) : Array<float3>());
+  out += ",\"warnings\":[";
+  for (size_t i = 0; i < warnings.size(); i++) {
+    if (i) {
+      out += ",";
+    }
+    json_escape(out, warnings[i].c_str());
+  }
+  out += "]}";
+  g_warnings = nullptr;
+  arena_flush(options);
+  return out;
+}
+
+/**
+ * ONE DEFERRED PICTURE'S PIXELS, pulled as a mesh is (`export_mesh`). A picture whose buffer this
+ * read loaded is let go again once its pixels are copied: headless Blender decodes an image only
+ * when something reads it, so the scene's pictures would otherwise all stay decoded in the heap
+ * because the viewer read them once (1,578 MB of RGBA for the Stoneguard file's 105). Answers
+ * `{"image": <as the frame would have carried it, or null when it has no readable pixels>,
+ * "warnings": [...]}`.
+ */
+static std::string export_image(const char *options_json)
+{
+  const Options options = parse_options(options_json);
+  arena_reset(options);
+  const auto found = g_deferred_images.find(options.key);
+  if (found == g_deferred_images.end()) {
+    std::string out = "{\"error\":";
+    json_escape(out, ("the last frame deferred no image '" + options.key + "'").c_str());
+    return out + "}";
+  }
+  const DeferredImage deferred = found->second;
+  g_deferred_images.erase(found);
+  std::vector<std::string> warnings;
+  g_warnings = &warnings;
+  const bool was_loaded = BKE_image_has_loaded_ibuf(deferred.image);
+  std::string described;
+  const bool written = write_image(described, deferred.image, deferred.revision, deferred.remap);
+  if (!was_loaded) {
+    BKE_image_free_buffers(deferred.image);
+  }
+  std::string out = "{\"image\":" + (written ? described : std::string("null")) +
+                    ",\"warnings\":[";
+  for (size_t i = 0; i < warnings.size(); i++) {
+    if (i) {
+      out += ",";
+    }
+    json_escape(out, warnings[i].c_str());
+  }
+  out += "]}";
+  g_warnings = nullptr;
+  arena_flush(options);
+  return out;
+}
+
+static std::string export_frame(const char *options_json)
+{
+  const Options options = parse_options(options_json);
+  g_deferred.clear();
+  g_deferred_images.clear();
+  arena_reset(options);
   std::vector<std::string> warnings;
   g_warnings = &warnings;
   ensure_callbacks();
@@ -2292,6 +2429,12 @@ static std::string export_frame(const char *options_json)
           meshes_json += "{\"revision\":";
           json_int(meshes_json, revision);
           meshes_json += ",\"unchanged\":true}";
+        }
+        else if (options.defer) {
+          g_deferred[geometry_key] = DeferredMesh{object, mesh_eval, orco, revision};
+          meshes_json += "{\"revision\":";
+          json_int(meshes_json, revision);
+          meshes_json += ",\"deferred\":true}";
         }
         else {
           write_mesh(meshes_json,
@@ -2606,7 +2749,11 @@ static std::string export_frame(const char *options_json)
       continue;
     }
     std::string described;
-    if (!write_image(described, entry.second.first, revision, entry.second.second)) {
+    if (options.defer) {
+      g_deferred_images[entry.first] = DeferredImage{entry.second.first, revision, entry.second.second};
+      described = "{\"revision\":" + std::to_string(revision) + ",\"deferred\":true}";
+    }
+    else if (!write_image(described, entry.second.first, revision, entry.second.second)) {
       continue;
     }
     if (!first_image) {
@@ -2660,15 +2807,7 @@ static std::string export_frame(const char *options_json)
   }
   out += "]}";
 
-  if (!options.buffer_path.empty()) {
-    FILE *file = fopen(options.buffer_path.c_str(), "wb");
-    if (file != nullptr) {
-      if (!g_arena.empty()) {
-        fwrite(g_arena.data(), 1, g_arena.size(), file);
-      }
-      fclose(file);
-    }
-  }
+  arena_flush(options);
   g_warnings = nullptr;
   return out;
 }
@@ -2685,6 +2824,21 @@ extern "C" const char *blender_web_export_frame(const char *options_json);
 extern "C" const uint8_t *blender_web_export_buffer();
 extern "C" size_t blender_web_export_buffer_size();
 extern "C" void blender_web_export_session_reset();
+extern "C" const char *blender_web_export_mesh(const char *options_json);
+
+const char *blender_web_export_mesh(const char *options_json)
+{
+  blender::web_export::g_frame = blender::web_export::export_mesh(options_json);
+  return blender::web_export::g_frame.c_str();
+}
+
+extern "C" const char *blender_web_export_image(const char *options_json);
+
+const char *blender_web_export_image(const char *options_json)
+{
+  blender::web_export::g_frame = blender::web_export::export_image(options_json);
+  return blender::web_export::g_frame.c_str();
+}
 
 const char *blender_web_export_frame(const char *options_json)
 {
@@ -2746,6 +2900,24 @@ static PyObject *py_export_frame(PyObject * /*self*/, PyObject *args)
   return PyUnicode_FromString(frame);
 }
 
+static PyObject *py_export_mesh(PyObject * /*self*/, PyObject *args)
+{
+  const char *options_json = nullptr;
+  if (!PyArg_ParseTuple(args, "z:export_mesh", &options_json)) {
+    return nullptr;
+  }
+  return PyUnicode_FromString(blender_web_export_mesh(options_json));
+}
+
+static PyObject *py_export_image(PyObject * /*self*/, PyObject *args)
+{
+  const char *options_json = nullptr;
+  if (!PyArg_ParseTuple(args, "z:export_image", &options_json)) {
+    return nullptr;
+  }
+  return PyUnicode_FromString(blender_web_export_image(options_json));
+}
+
 static PyObject *py_buffer(PyObject * /*self*/, PyObject * /*args*/)
 {
   if (blender::web_export::g_direct) {
@@ -2801,6 +2973,10 @@ static PyObject *py_memory_reset_peak(PyObject * /*self*/, PyObject * /*args*/)
 
 static PyMethodDef web_methods[] = {
     {"export_frame", py_export_frame, METH_VARARGS, "The export door: one frame as JSON."},
+    {"export_mesh", py_export_mesh, METH_VARARGS,
+     "One mesh the last frame deferred, its columns in a fresh arena."},
+    {"export_image", py_export_image, METH_VARARGS,
+     "One picture the last frame deferred, its pixels in a fresh arena."},
     {"buffer", py_buffer, METH_NOARGS, "The side arena the last frame's columns live in."},
     {"buffer_size", py_buffer_size, METH_NOARGS,
      "How many bytes the last frame's columns came to -- the accounting number, "
