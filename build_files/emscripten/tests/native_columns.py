@@ -10,10 +10,17 @@ mesh = bpy.data.meshes.new('concave')
 mesh.from_pydata([(0,0,0),(2,0,0),(2,2,0),(1,1,0),(0,2,0)], [], [(0,1,2,3,4)])
 obj = bpy.data.objects.new('concave', mesh)
 bpy.context.collection.objects.link(obj)
+for i in range(64):
+    linked = bpy.data.objects.new('linked%d' % i, mesh)
+    bpy.context.collection.objects.link(linked)
+checkpoint_count = 0
+def checkpoint():
+    global checkpoint_count
+    checkpoint_count += 1
 
 def frame(known=None):
-    return json.loads(_blender_web.export_frame(json.dumps({
-        'session': 'native-columns-proof', 'defer': True, 'known': known or {}})))
+    return json.loads(_blender_web.export_frame_chunked(json.dumps({
+        'session': 'native-columns-proof', 'defer': True, 'known': known or {}}), checkpoint))
 
 def verify(f):
     key, notice = next(iter(f['meshes'].items()))
@@ -38,4 +45,5 @@ mesh.update()
 bpy.context.view_layer.update()
 key2, revision2 = verify(frame({'mesh:' + key: revision}))
 assert key2 == key and revision2 != revision
+assert checkpoint_count >= 9
 print('NATIVE_COLUMNS_OK: concave initial, unchanged delta, edited delta')

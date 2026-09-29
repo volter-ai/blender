@@ -109,6 +109,7 @@
 #include "BLO_core_file_reader.hh"
 #include "BLO_read_write.hh"
 #include "BLO_readfile.hh"
+#include "BLI_time.h"
 #include "BLO_undofile.hh"
 
 #include "SEQ_iterator.hh"
@@ -4161,6 +4162,29 @@ static void blo_read_file_checks(Main *bmain)
   UNUSED_VARS_NDEBUG(bmain);
 }
 
+#ifdef __EMSCRIPTEN__
+static thread_local const char *(*read_checkpoint)() = nullptr;
+static thread_local double read_checkpoint_at = 0;
+void BLO_readfile_checkpoint_set(const char *(*checkpoint)())
+{
+  read_checkpoint = checkpoint;
+  read_checkpoint_at = BLI_time_now_seconds();
+}
+static bool readfile_checkpoint(FileData *fd)
+{
+  if (!read_checkpoint || BLI_time_now_seconds() - read_checkpoint_at < 0.05) {
+    return true;
+  }
+  const char *error = read_checkpoint();
+  read_checkpoint_at = BLI_time_now_seconds();
+  if (error) {
+    BLO_reportf_wrap(fd->reports, RPT_ERROR, "File load checkpoint failed: %s", error);
+    return false;
+  }
+  return true;
+}
+#endif
+
 BlendFileData *blo_read_file_internal(FileData *fd, const char *filepath)
 {
   BHead *bhead = blo_bhead_first(fd);
@@ -4171,7 +4195,11 @@ BlendFileData *blo_read_file_internal(FileData *fd, const char *filepath)
     /* Each ID owns one consecutive DATA run. Narrowed addresses must remain
      * unique within that run, or the data map would resolve an unrelated block. */
     Set<const void *> addresses;
+    int checkpoint_blocks = 0;
     for (BHead *block = bhead; block; block = blo_bhead_next(fd, block)) {
+      if (checkpoint_blocks++ % 256 == 0 && !readfile_checkpoint(fd)) {
+        return nullptr;
+      }
       if (block->code != BLO_CODE_DATA) {
         addresses.clear();
         continue;
@@ -4256,6 +4284,12 @@ BlendFileData *blo_read_file_internal(FileData *fd, const char *filepath)
   }
 
   while (bhead) {
+#ifdef __EMSCRIPTEN__
+    if (!readfile_checkpoint(fd)) {
+      bfd->main->is_read_invalid = true;
+      return bfd;
+    }
+#endif
     /* If not-null after the `switch`, the BHead is an ID one and needs to be read. */
     Main *bmain_to_read_into = nullptr;
     bool placeholder_set_indirect_extern = false;

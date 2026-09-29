@@ -5,6 +5,7 @@
  * Author: Sergey Sharybin. */
 
 #include <cassert>
+#include "BLI_cooperative_work.hh"
 
 #ifdef _MSC_VER
 #  include <iso646.h>
@@ -454,6 +455,8 @@ OpenSubdiv_Evaluator *openSubdiv_createEvaluatorFromTopologyRefiner(
     refiner->RefineUniform(options);
   }
 
+  blender::CooperativeWork::checkpoint();
+
   // Work around ASAN warnings, due to OpenSubdiv pretending to have an actual StencilTable
   // instance while it's really its base class.
   auto delete_stencil_table = [](const StencilTable *table) {
@@ -470,6 +473,7 @@ OpenSubdiv_Evaluator *openSubdiv_createEvaluatorFromTopologyRefiner(
   vertex_stencil_options.generateIntermediateLevels = stencil_generate_intermediate_levels;
   const StencilTable *vertex_stencils = StencilTableFactory::Create(*refiner,
                                                                     vertex_stencil_options);
+  blender::CooperativeWork::checkpoint();
   // Varying stencils.
   //
   // TODO(sergey): Seems currently varying stencils are always required in
@@ -488,6 +492,7 @@ OpenSubdiv_Evaluator *openSubdiv_createEvaluatorFromTopologyRefiner(
   for (int face_varying_channel = 0; face_varying_channel < num_face_varying_channels;
        ++face_varying_channel)
   {
+    blender::CooperativeWork::checkpoint();
     StencilTableFactory::Options face_varying_stencil_options;
     face_varying_stencil_options.generateOffsets = stencil_generate_offsets;
     face_varying_stencil_options.generateIntermediateLevels = stencil_generate_intermediate_levels;
@@ -496,6 +501,7 @@ OpenSubdiv_Evaluator *openSubdiv_createEvaluatorFromTopologyRefiner(
     all_face_varying_stencils.push_back(
         StencilTableFactory::Create(*refiner, face_varying_stencil_options));
   }
+  blender::CooperativeWork::checkpoint();
   // Generate bi-cubic patch table for the limit surface.
   PatchTableFactory::Options patch_options(level);
   patch_options.SetEndCapType(PatchTableFactory::Options::ENDCAP_GREGORY_BASIS);
@@ -503,6 +509,7 @@ OpenSubdiv_Evaluator *openSubdiv_createEvaluatorFromTopologyRefiner(
   patch_options.generateFVarTables = has_face_varying_data;
   patch_options.generateFVarLegacyLinearPatches = false;
   PatchTable *patch_table = PatchTableFactory::Create(*refiner, patch_options);
+  blender::CooperativeWork::checkpoint();
   // Append local points stencils.
   // Point stencils.
   const StencilTable *local_point_stencil_table = patch_table->GetLocalPointStencilTable();
@@ -520,6 +527,7 @@ OpenSubdiv_Evaluator *openSubdiv_createEvaluatorFromTopologyRefiner(
     patch_table->ReleaseLocalPointStencilTable();
 #endif
   }
+  blender::CooperativeWork::checkpoint();
   // Varying stencils.
   if (has_varying_data) {
     const StencilTable *local_point_varying_stencil_table =
@@ -537,6 +545,7 @@ OpenSubdiv_Evaluator *openSubdiv_createEvaluatorFromTopologyRefiner(
   for (int face_varying_channel = 0; face_varying_channel < num_face_varying_channels;
        ++face_varying_channel)
   {
+    blender::CooperativeWork::checkpoint();
     const StencilTable *table = StencilTableFactory::AppendLocalPointStencilTableFaceVarying(
         *refiner,
         all_face_varying_stencils[face_varying_channel],
@@ -550,6 +559,7 @@ OpenSubdiv_Evaluator *openSubdiv_createEvaluatorFromTopologyRefiner(
 #endif
     }
   }
+  blender::CooperativeWork::checkpoint();
   // Create OpenSubdiv's CPU side evaluator.
   blender::opensubdiv::EvalOutputAPI::EvalOutput *eval_output = nullptr;
 

@@ -64,6 +64,7 @@
 #include <algorithm>
 #include <cstring>
 #include <memory>
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -77,6 +78,7 @@
 #include "MEM_guardedalloc.h"
 
 #include "BLI_listbase.h"
+#include "BLI_cooperative_work.hh"
 #include "BLI_color.hh"
 #include "BLI_math_matrix_types.hh"
 #include "BLI_math_quaternion_types.hh"
@@ -104,6 +106,7 @@
 
 #include "BKE_attribute.hh"
 #include "BKE_callbacks.hh"
+#include "BLO_readfile.hh"
 
 #include "RNA_types.hh"
 #include "BKE_global.hh"
@@ -2319,8 +2322,10 @@ static std::string export_image(const char *options_json)
   return out;
 }
 
-static std::string export_frame(const char *options_json)
+static std::string export_frame(const char *options_json,
+                                const std::function<bool()> &checkpoint = {})
 {
+  CooperativeWork work(checkpoint);
   const Options options = parse_options(options_json);
   g_deferred.clear();
   g_deferred_images.clear();
@@ -2348,6 +2353,7 @@ static std::string export_frame(const char *options_json)
    * `updated: []`. `scene.cc` names this case itself -- "can be skipped for
    * example renderers that will read these and clear the flags later" -- so the
    * door does what `RE_engine` does: the same evaluation, minus the clear. */
+  if (checkpoint && !work.poll()) { g_warnings = nullptr; return "{}"; }
   if (options.evaluate) {
     BKE_main_view_layers_synced_ensure(resolved.bmain);
     DEG_graph_relations_update(resolved.depsgraph);
@@ -2396,7 +2402,14 @@ static std::string export_frame(const char *options_json)
   std::unordered_set<std::string> seen_lights;
   bool first_object = true, first_mesh = true, first_light = true;
 
+  int checkpoint_objects = 0;
   for (Base &base_ref : *BKE_view_layer_object_bases_get(view_layer_eval)) {
+    /* Park between bounded batches, including initial lazy subdivision reads.
+     * The caller may resume only this export; it must not mutate the graph. */
+    if (checkpoint && checkpoint_objects++ % 32 == 0 && !work.poll()) {
+      g_warnings = nullptr;
+      return "{}";
+    }
     Base *base = &base_ref;
     Object *object = base->object;
     if (object == nullptr) {
@@ -2454,7 +2467,10 @@ static std::string export_frame(const char *options_json)
                          (object->data != nullptr &&
                           geometry_dirty.count(DEG_get_original_id(static_cast<ID *>(object->data))));
       long long &revision = g_session.geometry_revision[geometry_key];
-      if (revision == 0 || moved) {
+      /* A shared geometry has one revision per frame, regardless of how many
+       * linked objects reference it. Later instances must not advance beyond
+       * the revision already published in this frame's mesh notice. */
+      if (!seen_meshes.count(geometry_key) && (revision == 0 || moved)) {
         revision += 1;
       }
       if (!seen_meshes.count(geometry_key)) {
@@ -2962,6 +2978,84 @@ static PyObject *py_export_frame(PyObject * /*self*/, PyObject *args)
   return PyUnicode_FromString(frame);
 }
 
+#ifdef __EMSCRIPTEN__
+static thread_local PyObject *load_checkpoint = nullptr;
+static thread_local std::string load_checkpoint_error;
+static thread_local std::unique_ptr<blender::CooperativeWork> load_work;
+static const char *python_load_checkpoint()
+{
+  /* bpy operators release the GIL while native file reading runs. This hook
+   * executes on that same thread and reacquires it only for the transport. */
+  const PyGILState_STATE state = PyGILState_Ensure();
+  PyObject *result = PyObject_CallNoArgs(load_checkpoint);
+  const char *error = nullptr;
+  if (result) {
+    Py_DECREF(result);
+  }
+  else {
+    PyObject *exception = PyErr_GetRaisedException();
+    PyObject *text = exception ? PyObject_Str(exception) : nullptr;
+    const char *message = text ? PyUnicode_AsUTF8(text) : nullptr;
+    load_checkpoint_error = message ? message : "checkpoint callback failed";
+    Py_XDECREF(text);
+    Py_XDECREF(exception);
+    PyErr_Clear();
+    error = load_checkpoint_error.c_str();
+  }
+  PyGILState_Release(state);
+  return error;
+}
+static PyObject *py_set_read_checkpoint(PyObject * /*self*/, PyObject *callback)
+{
+  if (callback != Py_None && !PyCallable_Check(callback)) {
+    PyErr_SetString(PyExc_TypeError, "read checkpoint must be callable or None");
+    return nullptr;
+  }
+  if (callback != Py_None && load_checkpoint) {
+    PyErr_SetString(PyExc_RuntimeError, "a read checkpoint is already installed");
+    return nullptr;
+  }
+  const bool failed = load_work && load_work->failed();
+  load_work.reset();
+  Py_XDECREF(load_checkpoint);
+  load_checkpoint = callback == Py_None ? nullptr : Py_NewRef(callback);
+  if (load_checkpoint) {
+    load_work = std::make_unique<blender::CooperativeWork>([]() {
+      return python_load_checkpoint() == nullptr;
+    });
+  }
+  blender::BLO_readfile_checkpoint_set(load_checkpoint ? +[]() -> const char * {
+    return blender::CooperativeWork::checkpoint() ? nullptr : load_checkpoint_error.c_str();
+  } : nullptr);
+  if (failed) {
+    PyErr_SetString(PyExc_RuntimeError, load_checkpoint_error.c_str());
+    return nullptr;
+  }
+  Py_RETURN_NONE;
+}
+#endif
+
+static PyObject *py_export_frame_chunked(PyObject * /*self*/, PyObject *args)
+{
+  const char *options_json = nullptr;
+  PyObject *checkpoint = nullptr;
+  if (!PyArg_ParseTuple(args, "zO:export_frame_chunked", &options_json, &checkpoint)) {
+    return nullptr;
+  }
+  if (!PyCallable_Check(checkpoint)) {
+    PyErr_SetString(PyExc_TypeError, "export checkpoint must be callable");
+    return nullptr;
+  }
+  blender::web_export::g_frame = blender::web_export::export_frame(options_json, [&]() {
+    PyObject *result = PyObject_CallNoArgs(checkpoint);
+    if (result == nullptr) { return false; }
+    Py_DECREF(result);
+    return true;
+  });
+  if (PyErr_Occurred()) { return nullptr; }
+  return PyUnicode_FromString(blender::web_export::g_frame.c_str());
+}
+
 static PyObject *py_export_mesh(PyObject * /*self*/, PyObject *args)
 {
   const char *options_json = nullptr;
@@ -3045,7 +3139,13 @@ static PyObject *py_memory_reset_peak(PyObject * /*self*/, PyObject * /*args*/)
 }
 
 static PyMethodDef web_methods[] = {
+#ifdef __EMSCRIPTEN__
+    {"set_read_checkpoint", py_set_read_checkpoint, METH_O,
+     "Set browser file-reader backpressure on this thread; None removes it. No Blender access in callback."},
+#endif
     {"export_frame", py_export_frame, METH_VARARGS, "The export door: one frame as JSON."},
+    {"export_frame_chunked", py_export_frame_chunked, METH_VARARGS,
+     "Export with cooperative checkpoints between evaluated object batches; no mutations during callbacks."},
     {"export_mesh", py_export_mesh, METH_VARARGS,
      "One mesh the last frame deferred, its columns in a fresh arena."},
     {"export_image", py_export_image, METH_VARARGS,

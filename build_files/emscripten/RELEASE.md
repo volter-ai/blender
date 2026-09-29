@@ -151,6 +151,22 @@ repeatable full-bit-pattern inputs. This arithmetic test is separate from the
 scene-level geometry comparison; it does not claim every Blender operation on
 every platform is bit-identical.
 
+## Cooperative browser loading
+
+The browser's file-reader callback pauses on its calling thread between read
+batches. `BLI_cooperative_work.hh` carries that same scope into subdivision
+table construction; worker threads have no callback. The optional
+`export_frame_chunked` Python door pauses between evaluated object batches and
+subdivision stages. Callbacks carry transport only, never Blender access while
+native state is partially constructed. Failure is latched and follows the
+normal invalid-file/export error paths; it does not publish a partial scene.
+No callback is installed in ordinary native builds.
+
+`tests/native_columns.py` verifies native corner triangles and unchanged/edited
+revisions with cooperative export enabled. `tests/read_checkpoint.py`, run with
+a large input, checks that a rejected read retains the preceding document and
+removes the callback. These are engine diagnostics, not a hosted viewport walk.
+
 ## Verification and packaging
 
 Run runtime/editor verification inside a World containing only the vendors

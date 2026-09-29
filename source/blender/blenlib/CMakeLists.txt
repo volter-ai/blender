@@ -203,6 +203,7 @@ set(SRC
   BLI_boxpack_2d.h
   BLI_build_config.h
   BLI_cache_mutex.hh
+  BLI_cooperative_work.hh
   BLI_color.hh
   BLI_color_mix.hh
   BLI_color_types.hh

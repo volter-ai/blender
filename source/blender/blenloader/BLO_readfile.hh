@@ -40,6 +40,13 @@ struct WorkSpace;
 struct bScreen;
 struct wmWindowManager;
 
+#ifdef __EMSCRIPTEN__
+/** Browser reader backpressure on the calling thread. The callback must not
+ * inspect or mutate partially read Blender data. Null return means resume;
+ * an error string aborts through the ordinary invalid-file cleanup path. */
+void BLO_readfile_checkpoint_set(const char *(*checkpoint)());
+#endif
+
 struct WorkspaceConfigFileData {
   Main *main; /* has to be freed when done reading file data */
 
