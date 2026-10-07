@@ -110,6 +110,8 @@
 #include "BLO_readfile.hh"
 
 #include "RNA_types.hh"
+#include "RNA_prototypes.hh"
+#include "bpy_rna.hh"
 #include "BKE_global.hh"
 #include "BKE_image.hh"
 #include "BKE_image_partial_update.hh"
@@ -570,6 +572,10 @@ struct Session {
 };
 
 static Session g_session;
+/** A render engine supplies its already evaluated graph for a scoped export.
+ * It stays alive until end_render_export, including every deferred pull. */
+static Depsgraph *g_render_graph = nullptr;
+static Session *g_viewport_session = nullptr;
 /** The depsgraph the last frame was read from. An undo step that restored it (memfile undo with
  *  `use_old_bmain_data`, `BKE_scene_undo_depsgraphs_restore`) keeps the session; one that replaced
  *  it does not (`session_undo`). Compared, never read through. */
@@ -597,7 +603,7 @@ static std::unordered_set<std::string> g_warned;
  * `export_frame` merges that with its own evaluation's record.
  * \{ */
 
-static void accumulate_updates(Depsgraph *depsgraph)
+static void accumulate_updates(Depsgraph *depsgraph, Session &session = g_session)
 {
   if (depsgraph == nullptr) {
     return;
@@ -611,8 +617,8 @@ static void accumulate_updates(Depsgraph *depsgraph)
   while (iter.valid) {
     ID *id_eval = static_cast<ID *>(iter.current);
     if (id_eval != nullptr) {
-      g_session.pending[DEG_get_original_id(id_eval)] |= uint32_t(id_eval->recalc);
-      g_session.pending_uids.insert(DEG_get_original_id(id_eval)->session_uid);
+      session.pending[DEG_get_original_id(id_eval)] |= uint32_t(id_eval->recalc);
+      session.pending_uids.insert(DEG_get_original_id(id_eval)->session_uid);
       if (GS(id_eval->name) == ID_OB) {
         const Object *object = reinterpret_cast<const Object *>(id_eval);
         if (object->data != nullptr) {
@@ -622,9 +628,9 @@ static void accumulate_updates(Depsgraph *depsgraph)
              * (`rna_DepsgraphUpdate_is_updated_geometry_get`): any recalc on the
              * object's DATA counts. That is what a deformed or modified object
              * needs -- its evaluated mesh moves while the datablock does not. */
-            g_session.pending[DEG_get_original_id(&object->id)] |= uint32_t(ID_RECALC_GEOMETRY);
-            g_session.pending[DEG_get_original_id(data_id)] |= uint32_t(data_id->recalc);
-            g_session.pending_uids.insert(DEG_get_original_id(data_id)->session_uid);
+            session.pending[DEG_get_original_id(&object->id)] |= uint32_t(ID_RECALC_GEOMETRY);
+            session.pending[DEG_get_original_id(data_id)] |= uint32_t(data_id->recalc);
+            session.pending_uids.insert(DEG_get_original_id(data_id)->session_uid);
           }
         }
       }
@@ -660,7 +666,7 @@ static void web_export_update_post(Main * /*bmain*/,
   if (depsgraph == nullptr || DEG_get_mode(depsgraph) != DAG_EVAL_VIEWPORT) {
     return;
   }
-  accumulate_updates(depsgraph);
+  accumulate_updates(depsgraph, g_viewport_session ? *g_viewport_session : g_session);
 }
 
 /** Defined with the image change record below; a file load drops every reader. */
@@ -1604,6 +1610,13 @@ struct Resolved {
 static Resolved resolve()
 {
   Resolved out;
+  if (g_render_graph != nullptr) {
+    out.bmain = DEG_get_bmain(g_render_graph);
+    out.scene = DEG_get_input_scene(g_render_graph);
+    out.view_layer = DEG_get_input_view_layer(g_render_graph);
+    out.depsgraph = g_render_graph;
+    return out;
+  }
   out.bmain = G_MAIN;
   if (out.bmain == nullptr) {
     return out;
@@ -2221,6 +2234,57 @@ struct DeferredImage {
 };
 static std::unordered_map<std::string, DeferredImage> g_deferred_images;
 
+/** Render and viewport evaluation can yield different meshes under the same
+ * original IDs. Never share their revision tables, image-change readers or
+ * deferred pointers. Restore the viewport's export state on scope exit. */
+struct SavedViewportExport {
+  Session session;
+  const Depsgraph *depsgraph;
+  std::unordered_set<std::string> warned;
+  std::unordered_map<std::string, DeferredMesh> meshes;
+  std::unordered_map<std::string, DeferredImage> images;
+  std::unordered_map<const Image *, PartialUpdateUser *> image_watchers;
+  std::vector<uint8_t> arena;
+  std::vector<std::unique_ptr<uint8_t[]>> blocks;
+  size_t block_bytes;
+  bool direct;
+  std::string frame;
+};
+static std::unique_ptr<SavedViewportExport> g_saved_viewport;
+
+static void begin_render_export(Depsgraph *graph)
+{
+  g_saved_viewport = std::make_unique<SavedViewportExport>(SavedViewportExport{
+      std::move(g_session), g_depsgraph, std::move(g_warned), std::move(g_deferred),
+      std::move(g_deferred_images), std::move(g_image_watchers), std::move(g_arena),
+      std::move(g_blocks), g_block_bytes, g_direct, std::move(g_frame)});
+  g_session = Session();
+  g_depsgraph = nullptr;
+  g_block_bytes = 0;
+  g_direct = false;
+  g_viewport_session = &g_saved_viewport->session;
+  g_render_graph = graph;
+}
+
+static void end_render_export()
+{
+  forget_image_watchers();
+  g_session = std::move(g_saved_viewport->session);
+  g_depsgraph = g_saved_viewport->depsgraph;
+  g_warned = std::move(g_saved_viewport->warned);
+  g_deferred = std::move(g_saved_viewport->meshes);
+  g_deferred_images = std::move(g_saved_viewport->images);
+  g_image_watchers = std::move(g_saved_viewport->image_watchers);
+  g_arena = std::move(g_saved_viewport->arena);
+  g_blocks = std::move(g_saved_viewport->blocks);
+  g_block_bytes = g_saved_viewport->block_bytes;
+  g_direct = g_saved_viewport->direct;
+  g_frame = std::move(g_saved_viewport->frame);
+  g_render_graph = nullptr;
+  g_viewport_session = nullptr;
+  g_saved_viewport.reset();
+}
+
 /** Free the last call's columns: each call's columns live until the next call. */
 static void arena_reset(const Options &options)
 {
@@ -2363,7 +2427,7 @@ static std::string export_frame(const char *options_json,
    * example renderers that will read these and clear the flags later" -- so the
    * door does what `RE_engine` does: the same evaluation, minus the clear. */
   if (checkpoint && !work.poll()) { g_warnings = nullptr; return "{}"; }
-  if (options.evaluate) {
+  if (options.evaluate && g_render_graph == nullptr) {
     BKE_main_view_layers_synced_ensure(resolved.bmain);
     DEG_graph_relations_update(resolved.depsgraph);
     DEG_evaluate_on_refresh(resolved.depsgraph, DEG_EVALUATE_SYNC_WRITEBACK_YES);
@@ -2387,7 +2451,9 @@ static std::string export_frame(const char *options_json,
   }
   g_session.pending_uids.clear();
   /* The record has been read; the next evaluation starts from a clean slate. */
-  DEG_ids_clear_recalc(resolved.depsgraph, false);
+  if (g_render_graph == nullptr) {
+    DEG_ids_clear_recalc(resolved.depsgraph, false);
+  }
 
   g_session.frame_revision += 1;
   if (!options.session.empty()) {
@@ -3093,6 +3159,33 @@ static PyObject *py_export_frame(PyObject * /*self*/, PyObject *args)
   return PyUnicode_FromString(frame);
 }
 
+static PyObject *py_begin_render_export(PyObject * /*self*/, PyObject *value)
+{
+  if (blender::web_export::g_render_graph != nullptr) {
+    PyErr_SetString(PyExc_RuntimeError, "a render export is already active");
+    return nullptr;
+  }
+  const blender::PointerRNA *pointer = blender::pyrna_struct_as_ptr(value, blender::RNA_Depsgraph);
+  if (pointer == nullptr) { return nullptr; }
+  blender::Depsgraph *graph = static_cast<blender::Depsgraph *>(pointer->data);
+  if (graph == nullptr || blender::DEG_get_mode(graph) != blender::DAG_EVAL_RENDER) {
+    PyErr_SetString(PyExc_ValueError, "render export requires the render engine's RENDER depsgraph");
+    return nullptr;
+  }
+  blender::web_export::begin_render_export(graph);
+  Py_RETURN_NONE;
+}
+
+static PyObject *py_end_render_export(PyObject * /*self*/, PyObject * /*args*/)
+{
+  if (blender::web_export::g_render_graph == nullptr) {
+    PyErr_SetString(PyExc_RuntimeError, "no render export is active");
+    return nullptr;
+  }
+  blender::web_export::end_render_export();
+  Py_RETURN_NONE;
+}
+
 #ifdef __EMSCRIPTEN__
 static thread_local PyObject *load_checkpoint = nullptr;
 static thread_local std::string load_checkpoint_error;
@@ -3254,6 +3347,10 @@ static PyObject *py_memory_reset_peak(PyObject * /*self*/, PyObject * /*args*/)
 }
 
 static PyMethodDef web_methods[] = {
+    {"begin_render_export", py_begin_render_export, METH_O,
+     "Scope exports and deferred pulls to a render engine's RENDER depsgraph; pair with end_render_export in finally before render returns."},
+    {"end_render_export", py_end_render_export, METH_NOARGS,
+     "Release render export resources and restore the viewport export state."},
 #ifdef __EMSCRIPTEN__
     {"set_read_checkpoint", py_set_read_checkpoint, METH_O,
      "Set browser file-reader backpressure on this thread; None removes it. No Blender access in callback."},
