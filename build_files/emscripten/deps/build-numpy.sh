@@ -15,9 +15,10 @@ build_dir="$build_root/build"
 tool_venv="$build_root/buildvenv"
 cross_dir="$build_root/crossenv"
 
-available_kb=$(df -Pk / | awk 'NR == 2 {print $4}')
+mkdir -p "$2"
+available_kb=$(df -Pk "$2" | awk 'NR == 2 {print $4}')
 if (( available_kb < 25 * 1024 * 1024 )); then
-  echo "refusing build: less than 25 GiB available on /" >&2
+  echo "refusing build: less than 25 GiB available at $2" >&2
   exit 75
 fi
 if [[ ! -x "$native_python" ]]; then

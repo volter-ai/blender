@@ -9,10 +9,11 @@ fi
 source_dir=$1
 build_dir=$2
 install_prefix=$3
-available_kb=$(df -Pk / | awk 'NR == 2 {print $4}')
+mkdir -p "$2"
+available_kb=$(df -Pk "$2" | awk 'NR == 2 {print $4}')
 
 if (( available_kb < 25 * 1024 * 1024 )); then
-  echo "refusing build: less than 25 GiB available on /" >&2
+  echo "refusing build: less than 25 GiB available at $2" >&2
   exit 75
 fi
 
