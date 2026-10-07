@@ -30,8 +30,8 @@ try:
     graph = bpy.context.evaluated_depsgraph_get()
     frame = json.loads(_blender_web.export_frame(json.dumps({'evaluate': True, 'defer': True})))
     rows = {row['name']: row for row in frame['objects']}
-    assert rows['SharedA']['mesh'] == rows['SharedB']['mesh']
-    assert len({rows[name]['mesh'] for name in ['SharedA', 'ArrayA', 'ArrayB', 'Collision']}) == 4
+    assert rows['SharedA']['mesh'] == rows['SharedB']['mesh'], ('unmodified sharing', {n:r['mesh'] for n,r in rows.items()})
+    assert len({rows[name]['mesh'] for name in ['SharedA', 'ArrayA', 'ArrayB', 'Collision']}) == 4, 'evaluated resources alias'
     expected = {}
     for obj in objects:
         key = rows[obj.name]['mesh']
