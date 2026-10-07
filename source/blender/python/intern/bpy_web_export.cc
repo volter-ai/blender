@@ -1851,7 +1851,8 @@ static uint64_t skin_digest(const Mesh &mesh)
       mix((uint64_t(uint32_t(dvert.dw[i].def_nr)) << 32) | bits);
     }
   }
-  LISTBASE_FOREACH (const bDeformGroup *, group, &mesh.vertex_group_names) {
+  for (const bDeformGroup *group = static_cast<const bDeformGroup *>(static_cast<const void *>(mesh.vertex_group_names.first)); group != nullptr;
+       group = group->next) {
     for (const char *c = group->name; *c != '\0'; c++) {
       mix(uint8_t(*c));
     }
@@ -1873,7 +1874,8 @@ static void write_skin(std::string &out, const Mesh &mesh, const std::string &ar
   const Span<MDeformVert> dverts = mesh.deform_verts();
   const int nv = mesh.verts_num;
   std::vector<std::string> groups;
-  LISTBASE_FOREACH (const bDeformGroup *, group, &mesh.vertex_group_names) {
+  for (const bDeformGroup *group = static_cast<const bDeformGroup *>(static_cast<const void *>(mesh.vertex_group_names.first)); group != nullptr;
+       group = group->next) {
     groups.emplace_back(group->name);
   }
   const uint16_t still = uint16_t(std::min<size_t>(groups.size(), 65535));
@@ -2048,7 +2050,8 @@ static void write_mesh(std::string &out,
   const bool skinned = !armature.empty() && !mesh.deform_verts().is_empty();
   std::unordered_set<std::string> skin_groups;
   if (skinned) {
-    LISTBASE_FOREACH (const bDeformGroup *, group, &mesh.vertex_group_names) {
+    for (const bDeformGroup *group = static_cast<const bDeformGroup *>(static_cast<const void *>(mesh.vertex_group_names.first)); group != nullptr;
+       group = group->next) {
       skin_groups.insert(group->name);
     }
   }
@@ -3261,7 +3264,9 @@ static std::string export_frame(const char *options_json,
    * action, so a reader re-bakes a clip exactly when Blender says it changed, never by guessing. */
   out += ",\"actions\":{";
   bool first_action = true;
-  LISTBASE_FOREACH (ID *, action, &resolved.bmain->actions) {
+  /* Through `void *`: the list's links are typed or untyped by build, and an ID heads every action. */
+  for (ID *action = static_cast<ID *>(static_cast<void *>(resolved.bmain->actions.first)); action != nullptr;
+       action = static_cast<ID *>(static_cast<void *>(action->next))) {
     long long &held = g_session.id_revision[action->session_uid];
     if (held == 0) {
       held = ++g_session.revision_clock;
