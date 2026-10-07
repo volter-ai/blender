@@ -105,6 +105,7 @@
 #include "DNA_world_types.h"
 
 #include "BKE_attribute.hh"
+#include "BKE_duplilist.hh"
 #include "BKE_callbacks.hh"
 #include "BLO_readfile.hh"
 
@@ -116,6 +117,7 @@
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_material.hh"
+#include "BKE_mesh_wrapper.hh"
 #include "BKE_mesh.hh"
 #include "BKE_modifier.hh"
 #include "BKE_object.hh"
@@ -294,6 +296,8 @@ struct Options {
    *  written only when the caller asks for that one mesh (`export_mesh`), so one call never holds
    *  every changed mesh's columns at once. */
   bool defer = false;
+  /** Export evaluated sources needed by the Python depsgraph placement bridge. */
+  bool instance_sources = false;
   /** The geometry key `export_mesh` writes. */
   std::string key;
   /** The caller's session name, echoed as the frame's `session`. */
@@ -464,6 +468,11 @@ static Options parse_options(const char *options_json)
     }
     if (key == "defer") {
       options.defer = (strncmp(value, "true", 4) == 0);
+      c = value;
+      continue;
+    }
+    if (key == "instance_sources") {
+      options.instance_sources = (strncmp(value, "true", 4) == 0);
       c = value;
       continue;
     }
@@ -2393,6 +2402,7 @@ static std::string export_frame(const char *options_json,
   BKE_view_layer_synced_ensure(*resolved.bmain, scene_eval, view_layer_eval);
 
   std::string objects_json;
+  std::string instance_geometry_json;
   std::string meshes_json;
   std::string lights_json;
   std::unordered_map<std::string, StandardMaterial> materials;
@@ -2402,16 +2412,90 @@ static std::string export_frame(const char *options_json,
   std::unordered_set<std::string> seen_lights;
   bool first_object = true, first_mesh = true, first_light = true;
 
+  /* Library objects can be excluded from the view layer while their collection or
+   * particle instances remain visible. The base walk alone cannot supply their meshes.
+   * Keep the real evaluated source, never the iterator's transient placement object:
+   * deferred geometry pulls must remain valid after the iterator is destroyed. */
+  struct ExportObject {
+    Object *object;
+    const Base *base;
+    Mesh *instance_mesh = nullptr;
+  };
+  std::vector<ExportObject> export_objects;
+  std::unordered_map<const ID *, size_t> exported_objects;
+  for (Base &base : *BKE_view_layer_object_bases_get(view_layer_eval)) {
+    if (base.object != nullptr) {
+      exported_objects.emplace(DEG_get_original_id(&base.object->id), export_objects.size());
+      export_objects.push_back({base.object, &base});
+    }
+  }
+  if (options.instance_sources) {
+    DEGObjectIterSettings instance_settings{};
+    instance_settings.depsgraph = resolved.depsgraph;
+    instance_settings.flags = DEG_OBJECT_ITER_FOR_RENDER_ENGINE_FLAGS;
+    DEGObjectIterData instance_data{};
+    instance_data.settings = &instance_settings;
+    instance_data.graph = resolved.depsgraph;
+    instance_data.flag = instance_settings.flags;
+    int checkpoint_instances = 0;
+    ITER_BEGIN (DEG_iterator_objects_begin,
+                DEG_iterator_objects_next,
+                DEG_iterator_objects_end,
+                &instance_data,
+                Object *,
+                placement)
+    {
+      (void)placement;
+      if (checkpoint && checkpoint_instances++ % 32 == 0 && !work.poll()) {
+        DEG_iterator_objects_end(&iter_macro);
+        g_warnings = nullptr;
+        return "{}";
+      }
+      const DupliObject *dupli = instance_data.dupli_object_current;
+      if (dupli == nullptr || dupli->ob == nullptr) {
+        continue;
+      }
+      Object *source = dupli->ob;
+      Mesh *source_mesh = BKE_object_get_evaluated_mesh_unchecked(source);
+      /* Match Cycles' object_get_data: a visible mesh dupli can carry its
+       * evaluated data even when its excluded source fails the ordinary
+       * object's geometry-visibility query. The data remains owned by the
+       * evaluated graph after the iterator ends. */
+      if (source_mesh == nullptr && dupli->ob_data == source->data &&
+          dupli->ob_data != nullptr && GS(dupli->ob_data->name) == ID_ME) {
+        source_mesh = BKE_mesh_wrapper_ensure_subdivision(
+            reinterpret_cast<Mesh *>(dupli->ob_data));
+      }
+      if (dupli->ob_data != source->data &&
+          dupli->ob_data != reinterpret_cast<ID *>(source_mesh)) {
+        unreached(std::string(source->id.name + 2) +
+                  ": instance geometry differs from its source datablock; it is not exported");
+        continue;
+      }
+      const ID *original = DEG_get_original_id(&source->id);
+      const auto found = exported_objects.find(original);
+      if (found == exported_objects.end()) {
+        exported_objects.emplace(original, export_objects.size());
+        export_objects.push_back({source, nullptr, source_mesh});
+      }
+      else if (BKE_object_get_evaluated_mesh(export_objects[found->second].object) == nullptr) {
+        export_objects[found->second].object = source;
+        export_objects[found->second].instance_mesh = source_mesh;
+      }
+    }
+    ITER_END;
+  }
+
   int checkpoint_objects = 0;
-  for (Base &base_ref : *BKE_view_layer_object_bases_get(view_layer_eval)) {
+  for (const ExportObject &entry : export_objects) {
     /* Park between bounded batches, including initial lazy subdivision reads.
      * The caller may resume only this export; it must not mutate the graph. */
     if (checkpoint && checkpoint_objects++ % 32 == 0 && !work.poll()) {
       g_warnings = nullptr;
       return "{}";
     }
-    Base *base = &base_ref;
-    Object *object = base->object;
+    const Base *base = entry.base;
+    Object *object = entry.object;
     if (object == nullptr) {
       continue;
     }
@@ -2424,9 +2508,22 @@ static std::string export_frame(const char *options_json,
      * mesh therefore share one set of columns, and a deformed one gets its
      * own. */
     std::string geometry_key;
-    Mesh *mesh_eval = BKE_object_get_evaluated_mesh(object);
+    Mesh *mesh_eval = entry.instance_mesh != nullptr ? entry.instance_mesh :
+                                                     BKE_object_get_evaluated_mesh(object);
     release_subdivision_descriptor(object);
     if (mesh_eval != nullptr) {
+      if (options.instance_sources) {
+        /* Consumed by the Python placement bridge, never retained by the presenter.
+         * A converted curve's dupli data differs from its Curve datablock but is
+         * precisely this exported mesh. Compare the live address within this one
+         * evaluated frame, not an original-ID revision shared by evaluated copies. */
+        if (!instance_geometry_json.empty()) {
+          instance_geometry_json += ",";
+        }
+        json_escape(instance_geometry_json, name.c_str());
+        instance_geometry_json += ":";
+        json_int(instance_geometry_json, reinterpret_cast<uintptr_t>(mesh_eval));
+      }
       const ID *mesh_original = DEG_get_original_id(&mesh_eval->id);
       const bool is_datablock = (object->data != nullptr) &&
                                 (mesh_original == DEG_get_original_id(
@@ -2613,13 +2710,14 @@ static std::string export_frame(const char *options_json,
     objects_json += "],\"matrix\":";
     write_matrix(objects_json, object->object_to_world());
     objects_json += ",\"visible\":";
-    objects_json += (base->flag & BASE_ENABLED_AND_VISIBLE_IN_DEFAULT_VIEWPORT) ? "true" : "false";
+    objects_json += (base != nullptr && (base->flag & BASE_ENABLED_AND_VISIBLE_IN_DEFAULT_VIEWPORT)) ?
+                        "true" : "false";
     objects_json += ",\"render_visible\":";
-    objects_json += (base->flag & BASE_ENABLED_RENDER) ? "true" : "false";
+    objects_json += (base != nullptr && (base->flag & BASE_ENABLED_RENDER)) ? "true" : "false";
     objects_json += ",\"selected\":";
-    objects_json += (base->flag & BASE_SELECTED) ? "true" : "false";
+    objects_json += (base != nullptr && (base->flag & BASE_SELECTED)) ? "true" : "false";
     objects_json += ",\"parent\":";
-    if (object->parent != nullptr) {
+    if (base != nullptr && object->parent != nullptr) {
       json_escape(objects_json, object->parent->id.name + 2);
     }
     else {
@@ -2855,8 +2953,11 @@ static std::string export_frame(const char *options_json,
    * caller's own string, so a `buffer` key here would be a fact the reader
    * already has -- and the presenter's frame schema is strict. */
   out += ",\"updated\":[" + updated_json + "],\"objects\":[" + objects_json + "],\"meshes\":{" +
-         meshes_json + "},\"materials\":{" + materials_json + "},\"images\":{" + images_json +
-         "},\"graph_images\":{" + graph_images_json + "},\"lights\":{" + lights_json + "},\"warnings\":[";
+         meshes_json + "},\"materials\":{" + materials_json + "},\"images\":{" + images_json + "}";
+  if (options.instance_sources) {
+    out += ",\"instance_geometry\":{" + instance_geometry_json + "}";
+  }
+  out += ",\"graph_images\":{" + graph_images_json + "},\"lights\":{" + lights_json + "},\"warnings\":[";
   for (size_t i = 0; i < warnings.size(); i++) {
     if (i) {
       out += ",";
