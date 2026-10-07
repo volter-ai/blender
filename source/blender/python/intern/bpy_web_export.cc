@@ -121,6 +121,7 @@
 #include "BKE_material.hh"
 #include "BKE_mesh_wrapper.hh"
 #include "BKE_mesh.hh"
+#include "BKE_mesh_tangent.hh"
 #include "BKE_modifier.hh"
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
@@ -320,6 +321,8 @@ struct Options {
   /** Those of the graphs that read Generated coordinates: a deformed mesh
    *  wearing one ships its orco column (`deformed_orco`). */
   std::unordered_set<std::string> graph_generated;
+  /** Graphs with tangent-space Normal Map nodes need Blender's Mikk frame. */
+  std::unordered_set<std::string> graph_tangents;
   std::vector<std::string> unknown_keys;
 };
 
@@ -493,6 +496,12 @@ static Options parse_options(const char *options_json)
       std::vector<std::string> names;
       c = read_string_array(value, names);
       options.graph_generated.insert(names.begin(), names.end());
+      continue;
+    }
+    if (key == "graph_tangents") {
+      std::vector<std::string> names;
+      c = read_string_array(value, names);
+      options.graph_tangents.insert(names.begin(), names.end());
       continue;
     }
     if (key == "graph_images") {
@@ -1798,7 +1807,8 @@ static Array<float3> deformed_orco(const Object *object)
 static void write_mesh(std::string &out,
                        const Mesh &mesh,
                        const long long revision,
-                       const Span<float3> orco = {})
+                       const Span<float3> orco = {},
+                       const bool tangents = false)
 {
   const Span<float3> positions = mesh.vert_positions();
   const Span<int> corner_verts = mesh.corner_verts();
@@ -1991,6 +2001,47 @@ static void write_mesh(std::string &out,
 
   const StringRefNull active_uv = mesh.active_uv_map_name();
   const StringRefNull render_uv = mesh.default_uv_map_name();
+
+  if (tangents) {
+    /* The evaluated mesh's MikkTSpace calculation, used by Blender's draw
+     * engine and Cycles. No authored attribute or datablock is changed. */
+    std::vector<std::string> uv_names;
+    attributes.foreach_attribute([&](const bke::AttributeIter &iter) {
+      if (iter.domain == bke::AttrDomain::Corner && iter.data_type == bke::AttrType::Float2) {
+        uv_names.emplace_back(iter.name.c_str());
+      }
+    });
+    Array<VArraySpan<float2>> uv_maps(uv_names.size());
+    Array<Span<float2>> uv_spans(uv_names.size());
+    for (int i = 0; i < int(uv_names.size()); i++) {
+      uv_maps[i] = *attributes.lookup<float2>(uv_names[i], bke::AttrDomain::Corner);
+      uv_spans[i] = uv_maps[i];
+    }
+    if (!uv_names.empty()) {
+      const VArraySpan<bool> sharp_faces = *attributes.lookup_or_default<bool>(
+          "sharp_face", bke::AttrDomain::Face, false);
+      const Array<Array<float4>> frames = bke::mesh::calc_uv_tangents(
+          positions, mesh.faces(), corner_verts, corner_triangles, mesh.corner_tri_faces(),
+          sharp_faces, mesh.vert_normals(), mesh.face_normals(), corner_normals, uv_spans);
+      for (int i = 0; i < int(uv_names.size()); i++) {
+        const ColumnRef ref = arena_write(frames[i].data(), frames[i].size() * sizeof(float4),
+                                         "f32", size_t(nc), 4);
+        const auto append = [&](const std::string &name) {
+          if (!first_attribute) attributes_json += ",";
+          first_attribute = false;
+          attributes_json += "{\"name\":";
+          json_escape(attributes_json, (".blender.tangent:" + name).c_str());
+          attributes_json += ",\"domain\":\"CORNER\",\"type\":\"FLOAT4\",\"data\":";
+          bool only = true;
+          std::string entry;
+          json_column(entry, "x", ref, only);
+          attributes_json += entry.substr(entry.find(':') + 1) + "}";
+        };
+        append(uv_names[i]);
+        if (uv_names[i] == render_uv) append("");
+      }
+    }
+  }
 
   out += "{\"revision\":";
   json_int(out, revision);
@@ -2223,6 +2274,7 @@ struct DeferredMesh {
   const Mesh *mesh = nullptr;
   bool orco = false;
   long long revision = 0;
+  bool tangents = false;
 };
 static std::unordered_map<std::string, DeferredMesh> g_deferred;
 
@@ -2339,7 +2391,8 @@ static std::string export_mesh(const char *options_json)
   write_mesh(out,
              *deferred.mesh,
              deferred.revision,
-             deferred.orco ? deformed_orco(deferred.object) : Array<float3>());
+             deferred.orco ? deformed_orco(deferred.object) : Array<float3>(),
+             deferred.tangents);
   out += ",\"warnings\":[";
   for (size_t i = 0; i < warnings.size(); i++) {
     if (i) {
@@ -2609,6 +2662,16 @@ static std::string export_frame(const char *options_json,
       /* Object and mesh names occupy independent Blender namespaces. */
       geometry_key = is_datablock ? "mesh:" + std::string(mesh_original->name + 2) :
                                    "object:" + name;
+      bool tangents = false;
+      for (int slot = 0; !tangents && slot < object->totcol; slot++) {
+        const Material *material = BKE_object_material_get_eval(object, short(slot + 1));
+        tangents = material != nullptr && options.graph_tangents.count(
+            DEG_get_original_id(&material->id)->name + 2) != 0;
+      }
+      /* Layout is part of identity: adding/removing a Normal Map must never
+       * reuse a cached mesh without tangents. Distinct namespaces also cover
+       * linked meshes whose object material overrides require different layouts. */
+      if (tangents) geometry_key = "tangent:" + geometry_key;
       /* A DEFORMED mesh whose material graph reads Generated coordinates
        * carries its orco, when every modifier only deforms. Deformed is
        * "its positions are not its input's": an undeformed evaluation shares
@@ -2666,7 +2729,7 @@ static std::string export_frame(const char *options_json,
           meshes_json += ",\"unchanged\":true}";
         }
         else if (options.defer) {
-          g_deferred[geometry_key] = DeferredMesh{object, mesh_eval, orco, revision};
+          g_deferred[geometry_key] = DeferredMesh{object, mesh_eval, orco, revision, tangents};
           meshes_json += "{\"revision\":";
           json_int(meshes_json, revision);
           meshes_json += ",\"deferred\":true}";
@@ -2675,7 +2738,8 @@ static std::string export_frame(const char *options_json,
           write_mesh(meshes_json,
                      *mesh_eval,
                      revision,
-                     orco ? deformed_orco(object) : Array<float3>());
+                     orco ? deformed_orco(object) : Array<float3>(),
+                     tangents);
         }
       }
     }
