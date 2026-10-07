@@ -2525,10 +2525,17 @@ static std::string export_frame(const char *options_json,
         json_int(instance_geometry_json, reinterpret_cast<uintptr_t>(mesh_eval));
       }
       const ID *mesh_original = DEG_get_original_id(&mesh_eval->id);
-      const bool is_datablock = (object->data != nullptr) &&
+      /* Evaluated copies keep the input ID as their original ID even when
+       * modifiers changed their vertices/topology. Original-ID equality alone
+       * therefore aliases different Array, Mirror, deform and shape-key outputs.
+       * Only the actual input mesh can borrow the shared datablock resource. */
+      const bool is_datablock = mesh_eval == input_mesh(object) &&
+                                (object->data != nullptr) &&
                                 (mesh_original == DEG_get_original_id(
                                                       static_cast<ID *>(object->data)));
-      geometry_key = is_datablock ? std::string(mesh_original->name + 2) : name;
+      /* Object and mesh names occupy independent Blender namespaces. */
+      geometry_key = is_datablock ? "mesh:" + std::string(mesh_original->name + 2) :
+                                   "object:" + name;
       /* A DEFORMED mesh whose material graph reads Generated coordinates
        * carries its orco, when every modifier only deforms. Deformed is
        * "its positions are not its input's": an undeformed evaluation shares
