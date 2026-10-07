@@ -117,6 +117,7 @@
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_material.hh"
+#include "BKE_mesh_wrapper.hh"
 #include "BKE_mesh.hh"
 #include "BKE_modifier.hh"
 #include "BKE_object.hh"
@@ -2418,6 +2419,7 @@ static std::string export_frame(const char *options_json,
   struct ExportObject {
     Object *object;
     const Base *base;
+    Mesh *instance_mesh = nullptr;
   };
   std::vector<ExportObject> export_objects;
   std::unordered_map<const ID *, size_t> exported_objects;
@@ -2454,8 +2456,18 @@ static std::string export_frame(const char *options_json,
         continue;
       }
       Object *source = dupli->ob;
+      Mesh *source_mesh = BKE_object_get_evaluated_mesh_unchecked(source);
+      /* Match Cycles' object_get_data: a visible mesh dupli can carry its
+       * evaluated data even when its excluded source fails the ordinary
+       * object's geometry-visibility query. The data remains owned by the
+       * evaluated graph after the iterator ends. */
+      if (source_mesh == nullptr && dupli->ob_data == source->data &&
+          dupli->ob_data != nullptr && GS(dupli->ob_data->name) == ID_ME) {
+        source_mesh = BKE_mesh_wrapper_ensure_subdivision(
+            reinterpret_cast<Mesh *>(dupli->ob_data));
+      }
       if (dupli->ob_data != source->data &&
-          dupli->ob_data != reinterpret_cast<ID *>(BKE_object_get_evaluated_mesh(source))) {
+          dupli->ob_data != reinterpret_cast<ID *>(source_mesh)) {
         unreached(std::string(source->id.name + 2) +
                   ": instance geometry differs from its source datablock; it is not exported");
         continue;
@@ -2464,10 +2476,11 @@ static std::string export_frame(const char *options_json,
       const auto found = exported_objects.find(original);
       if (found == exported_objects.end()) {
         exported_objects.emplace(original, export_objects.size());
-        export_objects.push_back({source, nullptr});
+        export_objects.push_back({source, nullptr, source_mesh});
       }
       else if (BKE_object_get_evaluated_mesh(export_objects[found->second].object) == nullptr) {
         export_objects[found->second].object = source;
+        export_objects[found->second].instance_mesh = source_mesh;
       }
     }
     ITER_END;
@@ -2495,7 +2508,8 @@ static std::string export_frame(const char *options_json,
      * mesh therefore share one set of columns, and a deformed one gets its
      * own. */
     std::string geometry_key;
-    Mesh *mesh_eval = BKE_object_get_evaluated_mesh(object);
+    Mesh *mesh_eval = entry.instance_mesh != nullptr ? entry.instance_mesh :
+                                                     BKE_object_get_evaluated_mesh(object);
     release_subdivision_descriptor(object);
     if (mesh_eval != nullptr) {
       if (options.instance_sources) {
