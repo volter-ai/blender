@@ -96,6 +96,7 @@
 #include "DNA_light_types.h"
 #include "DNA_material_types.h"
 #include "DNA_mesh_types.h"
+#include "DNA_meshdata_types.h"
 #include "DNA_modifier_types.h"
 #include "DNA_node_types.h"
 #include "DNA_object_enums.h"
@@ -569,6 +570,10 @@ struct Session {
   /** Whether a geometry key's columns carry `orco` at its revision: a flip
    *  bumps the revision like a geometry change, since the columns change. */
   std::unordered_map<std::string, bool> geometry_orco;
+  /** The deform weights' digest a geometry key's skin columns were written at (`skin_digest`):
+   *  a weight edit is no geometry update in the depsgraph's record, so a change of it bumps the
+   *  revision like a geometry change, since the columns change. */
+  std::unordered_map<std::string, uint64_t> geometry_skin;
   /** THE UPDATE RECORD SINCE THE LAST FRAME, from every evaluation whoever ran
    *  it -- see `web_export_update_post`. Original ID -> OR of `recalc` flags. */
   std::unordered_map<const ID *, uint32_t> pending;
@@ -1804,11 +1809,137 @@ static Array<float3> deformed_orco(const Object *object)
   return orco;
 }
 
+
+/** THE ARMATURE THAT DEFORMS AN OBJECT: the one its first enabled Armature modifier names, by
+ * name, which is the key the frame's `armatures` already uses. Empty when none deforms it. The
+ * presenter skins the object's exported mesh with this armature's bones, bound at the pose the
+ * mesh was evaluated in, so the exported pose stays exact and a played clip moves it. */
+static std::string skin_armature(const Object *object)
+{
+  if (object == nullptr || object->type != OB_MESH) {
+    return {};
+  }
+  for (const ModifierData &md : object->modifiers) {
+    if (md.type != eModifierType_Armature || (md.mode & eModifierMode_Realtime) == 0) {
+      continue;
+    }
+    const ArmatureModifierData &armature = reinterpret_cast<const ArmatureModifierData &>(md);
+    if (armature.object != nullptr) {
+      return std::string(armature.object->id.name + 2);
+    }
+  }
+  return {};
+}
+
+/** THE DEFORM WEIGHTS' DIGEST, of the EVALUATED mesh the skin columns are written from: every
+ * vertex's (group, weight) pairs and the group names. Walked for a skinned mesh on every frame,
+ * because no update record says a weight moved (measured 2026-09-19, `session.py` `_weights`). */
+static uint64_t skin_digest(const Mesh &mesh)
+{
+  uint64_t hash = 1469598103934665603ull;
+  const auto mix = [&](const uint64_t value) {
+    hash ^= value;
+    hash *= 1099511628211ull;
+  };
+  const Span<MDeformVert> dverts = mesh.deform_verts();
+  mix(uint64_t(dverts.size()));
+  for (const MDeformVert &dvert : dverts) {
+    mix(uint64_t(dvert.totweight));
+    for (int i = 0; i < dvert.totweight; i++) {
+      uint32_t bits;
+      std::memcpy(&bits, &dvert.dw[i].weight, sizeof(bits));
+      mix((uint64_t(uint32_t(dvert.dw[i].def_nr)) << 32) | bits);
+    }
+  }
+  for (const bDeformGroup *group = static_cast<const bDeformGroup *>(static_cast<const void *>(mesh.vertex_group_names.first)); group != nullptr;
+       group = group->next) {
+    for (const char *c = group->name; *c != '\0'; c++) {
+      mix(uint8_t(*c));
+    }
+    mix(0x100);
+  }
+  return hash;
+}
+
+/** THE SKIN COLUMNS: per exported vertex, the four strongest of its deform groups and their
+ * weights, normalized as Blender's Armature modifier normalizes them (it divides by the sum of the
+ * contributing weights). A group index is the mesh's own vertex group index; the presenter maps it
+ * to the armature's bone of the same name, and a group no bone is named for weights nothing, as in
+ * Blender. A vertex no group weights carries index `groups.size()` and weight 1: the presenter
+ * gives that index a bone that never moves, which is Blender's "an unweighted vertex stays put".
+ * Read from the evaluated mesh, so the columns follow whatever the modifier stack made of the
+ * vertices (a Mirror's mirrored groups, a Subdivision's interpolated weights) by construction. */
+static void write_skin(std::string &out, const Mesh &mesh, const std::string &armature)
+{
+  const Span<MDeformVert> dverts = mesh.deform_verts();
+  const int nv = mesh.verts_num;
+  std::vector<std::string> groups;
+  for (const bDeformGroup *group = static_cast<const bDeformGroup *>(static_cast<const void *>(mesh.vertex_group_names.first)); group != nullptr;
+       group = group->next) {
+    groups.emplace_back(group->name);
+  }
+  const uint16_t still = uint16_t(std::min<size_t>(groups.size(), 65535));
+  std::vector<uint16_t> joints(size_t(nv) * 4, 0);
+  std::vector<float> weights(size_t(nv) * 4, 0.0f);
+  for (int v = 0; v < nv; v++) {
+    std::pair<float, int> best[4] = {{0.0f, -1}, {0.0f, -1}, {0.0f, -1}, {0.0f, -1}};
+    if (v < int(dverts.size())) {
+      const MDeformVert &dvert = dverts[v];
+      for (int i = 0; i < dvert.totweight; i++) {
+        const int group = dvert.dw[i].def_nr;
+        const float weight = dvert.dw[i].weight;
+        if (group < 0 || group >= int(groups.size()) || !(weight > 0.0f)) {
+          continue;
+        }
+        for (int k = 0; k < 4; k++) {
+          if (weight > best[k].first) {
+            for (int m = 3; m > k; m--) {
+              best[m] = best[m - 1];
+            }
+            best[k] = {weight, group};
+            break;
+          }
+        }
+      }
+    }
+    float sum = 0.0f;
+    for (int k = 0; k < 4; k++) {
+      sum += best[k].first;
+    }
+    if (!(sum > 0.0f)) {
+      joints[size_t(v) * 4] = still;
+      weights[size_t(v) * 4] = 1.0f;
+      continue;
+    }
+    for (int k = 0; k < 4; k++) {
+      joints[size_t(v) * 4 + k] = best[k].second < 0 ? 0 : uint16_t(best[k].second);
+      weights[size_t(v) * 4 + k] = best[k].first / sum;
+    }
+  }
+  const ColumnRef joints_ref = arena_write(joints.data(), joints.size() * sizeof(uint16_t), "u16", size_t(nv), 4);
+  const ColumnRef weights_ref = arena_write(weights.data(), weights.size() * sizeof(float), "f32", size_t(nv), 4);
+  out += ",\"skin\":{\"armature\":";
+  json_escape(out, armature.c_str());
+  out += ",\"groups\":[";
+  for (size_t i = 0; i < groups.size(); i++) {
+    if (i) {
+      out += ",";
+    }
+    json_escape(out, groups[i].c_str());
+  }
+  out += "],\"columns\":{";
+  bool first = true;
+  json_column(out, "joints", joints_ref, first);
+  json_column(out, "weights", weights_ref, first);
+  out += "}}";
+}
+
 static void write_mesh(std::string &out,
                        const Mesh &mesh,
                        const long long revision,
                        const Span<float3> orco = {},
-                       const bool tangents = false)
+                       const bool tangents = false,
+                       const std::string &armature = {})
 {
   const Span<float3> positions = mesh.vert_positions();
   const Span<int> corner_verts = mesh.corner_verts();
@@ -1914,7 +2045,20 @@ static void write_mesh(std::string &out,
    * warning naming it, never a silent drop. */
   std::string attributes_json;
   bool first_attribute = true;
+  /* A SKINNED MESH'S VERTEX GROUPS travel as its skin columns (`write_skin`), four per vertex,
+   * not as one float column per group. */
+  const bool skinned = !armature.empty() && !mesh.deform_verts().is_empty();
+  std::unordered_set<std::string> skin_groups;
+  if (skinned) {
+    for (const bDeformGroup *group = static_cast<const bDeformGroup *>(static_cast<const void *>(mesh.vertex_group_names.first)); group != nullptr;
+       group = group->next) {
+      skin_groups.insert(group->name);
+    }
+  }
   attributes.foreach_attribute([&](const bke::AttributeIter &iter) {
+    if (skinned && skin_groups.count(std::string(iter.name.c_str()))) {
+      return;
+    }
     const char *domain_name = attribute_domain_name(iter.domain);
     const char *type_name = attribute_type_name(iter.data_type);
     const std::string layer(iter.name.c_str());
@@ -2088,7 +2232,11 @@ static void write_mesh(std::string &out,
   json_column(out, "edgeHide", edge_hide_ref, first);
   json_column(out, "faceSelect", face_select_ref, first);
   json_column(out, "faceHide", face_hide_ref, first);
-  out += "},\"attributes\":[" + attributes_json + "]}";
+  out += "},\"attributes\":[" + attributes_json + "]";
+  if (skinned) {
+    write_skin(out, mesh, armature);
+  }
+  out += "}";
 }
 
 /** Rec.709 luma: what a colour image means as a single roughness value. */
@@ -2275,6 +2423,7 @@ struct DeferredMesh {
   bool orco = false;
   long long revision = 0;
   bool tangents = false;
+  std::string armature;
 };
 static std::unordered_map<std::string, DeferredMesh> g_deferred;
 
@@ -2392,7 +2541,8 @@ static std::string export_mesh(const char *options_json)
              *deferred.mesh,
              deferred.revision,
              deferred.orco ? deformed_orco(deferred.object) : Array<float3>(),
-             deferred.tangents);
+             deferred.tangents,
+             deferred.armature);
   out += ",\"warnings\":[";
   for (size_t i = 0; i < warnings.size(); i++) {
     if (i) {
@@ -2702,7 +2852,18 @@ static std::string export_frame(const char *options_json,
                                                                      held_orco->second != orco;
         g_session.geometry_orco[geometry_key] = orco;
       }
-      const bool moved = orco_flipped || geometry_dirty.count(original) ||
+      const std::string armature = skin_armature(object);
+      bool skin_changed = false;
+      if (!armature.empty() && !mesh_eval->deform_verts().is_empty()) {
+        const uint64_t digest = skin_digest(*mesh_eval);
+        const auto held_skin = g_session.geometry_skin.find(geometry_key);
+        skin_changed = held_skin == g_session.geometry_skin.end() || held_skin->second != digest;
+        g_session.geometry_skin[geometry_key] = digest;
+      }
+      else if (g_session.geometry_skin.erase(geometry_key) != 0) {
+        skin_changed = true;
+      }
+      const bool moved = orco_flipped || skin_changed || geometry_dirty.count(original) ||
                          geometry_dirty.count(mesh_original) ||
                          (object->data != nullptr &&
                           geometry_dirty.count(DEG_get_original_id(static_cast<ID *>(object->data))));
@@ -2729,7 +2890,7 @@ static std::string export_frame(const char *options_json,
           meshes_json += ",\"unchanged\":true}";
         }
         else if (options.defer) {
-          g_deferred[geometry_key] = DeferredMesh{object, mesh_eval, orco, revision, tangents};
+          g_deferred[geometry_key] = DeferredMesh{object, mesh_eval, orco, revision, tangents, armature};
           meshes_json += "{\"revision\":";
           json_int(meshes_json, revision);
           meshes_json += ",\"deferred\":true}";
@@ -2739,7 +2900,8 @@ static std::string export_frame(const char *options_json,
                      *mesh_eval,
                      revision,
                      orco ? deformed_orco(object) : Array<float3>(),
-                     tangents);
+                     tangents,
+                     armature);
         }
       }
     }
@@ -3098,6 +3260,26 @@ static std::string export_frame(const char *options_json,
    * already has -- and the presenter's frame schema is strict. */
   out += ",\"updated\":[" + updated_json + "],\"objects\":[" + objects_json + "],\"meshes\":{" +
          meshes_json + "},\"materials\":{" + materials_json + "},\"images\":{" + images_json + "}";
+  /* EVERY ACTION AND ITS REVISION, from the same update record as the meshes: a key edit tags its
+   * action, so a reader re-bakes a clip exactly when Blender says it changed, never by guessing. */
+  out += ",\"actions\":{";
+  bool first_action = true;
+  /* Through `void *`: the list's links are typed or untyped by build, and an ID heads every action. */
+  for (ID *action = static_cast<ID *>(static_cast<void *>(resolved.bmain->actions.first)); action != nullptr;
+       action = static_cast<ID *>(static_cast<void *>(action->next))) {
+    long long &held = g_session.id_revision[action->session_uid];
+    if (held == 0) {
+      held = ++g_session.revision_clock;
+    }
+    if (!first_action) {
+      out += ",";
+    }
+    first_action = false;
+    json_escape(out, action->name + 2);
+    out += ":";
+    json_int(out, held);
+  }
+  out += "}";
   if (options.instance_sources) {
     out += ",\"instance_geometry\":{" + instance_geometry_json + "}";
   }
