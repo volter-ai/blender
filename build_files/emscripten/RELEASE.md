@@ -78,6 +78,11 @@ static browser-target interpreter. Its upstream wasm config site and explicit
 module profile are in `deps/build-python.sh` and `python/browser-module-profile.txt`.
 `-DPY_CALL_TRAMPOLINE` is required for Blender's CPython slot arity casts.
 The HACL SHA2 archive and system expat are part of the final link.
+The native helper's `_ssl`, through which pip fetches Cython for NumPy, needs
+the build host's OpenSSL 1.1.1 to 3.x:
+Python 3.13.13 does not build it against OpenSSL 4. Where pkg-config finds
+OpenSSL 4 first, put OpenSSL 3's `lib/pkgconfig` on `PKG_CONFIG_PATH` for
+`build-python.sh`.
 
 NumPy 2.3.4 uses its own vendored Meson 1.8.3 and Cython 3.3.0. The recipe
 harvests exactly thirteen production extension link closures into one archive
