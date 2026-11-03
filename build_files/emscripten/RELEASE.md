@@ -69,7 +69,9 @@ conversion table into its evaluation stencils, the browser releases that scratch
 before building later face-varying channels. Coefficients, evaluation order,
 subdivision settings and UV channels are unchanged. `TBB_DIR` may select an
 already-built oneTBB when preparing OpenSubdiv in a separate install prefix.
-PugiXML is not enabled or linked.
+PugiXML is not enabled or linked. Bullet is Blender's vendored `extern/bullet2`,
+not a dependency archive; it builds with Blender's double precision on Bullet's
+scalar path for wasm32, so the Rigid Body panel can add a body.
 
 CPython 3.13.13 builds a complete native helper interpreter and a separate
 static browser-target interpreter. Its upstream wasm config site and explicit
