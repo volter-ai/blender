@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 # Headless Blender for wasm32. Start from Blender's own minimal configuration,
-# then enable only the modeling features exercised by the product battery.
+# then enable only the features the product uses.
 include("${CMAKE_CURRENT_LIST_DIR}/../cmake/config/blender_lite.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/../cmake/config/blender_headless.cmake")
 
@@ -28,6 +28,7 @@ set(WITH_MANIFOLD ON CACHE BOOL "" FORCE)
 set(WITH_IK_SOLVER ON CACHE BOOL "" FORCE)
 set(WITH_IK_ITASC ON CACHE BOOL "" FORCE)
 set(WITH_MOD_REMESH ON CACHE BOOL "" FORCE)
+set(WITH_BULLET ON CACHE BOOL "" FORCE)
 
 set(WITH_IO_PLY ON CACHE BOOL "" FORCE)
 set(WITH_IO_STL ON CACHE BOOL "" FORCE)
@@ -61,7 +62,6 @@ set(WITH_XR_OPENXR OFF CACHE BOOL "" FORCE)
 set(WITH_OPENVDB OFF CACHE BOOL "" FORCE)
 set(WITH_NANOVDB OFF CACHE BOOL "" FORCE)
 set(WITH_OPENIMAGEDENOISE OFF CACHE BOOL "" FORCE)
-set(WITH_BULLET OFF CACHE BOOL "" FORCE)
 set(WITH_HYDRA OFF CACHE BOOL "" FORCE)
 set(WITH_MATERIALX OFF CACHE BOOL "" FORCE)
 set(WITH_DRACO OFF CACHE BOOL "" FORCE)
