@@ -121,7 +121,10 @@ and the existing export/session doors. `blender_editor_diag` links the same
 objects with assertions, stack checks and function names for diagnosis. Do not
 build both final links concurrently. The release output is
 `$BLENDER_BUILD/browser/build-editor/bin/blender_browser.{js,wasm,data}`.
-The preload list and exclusions are in the same CMake file. The browser
+The preload list and exclusions are in the same CMake file. A runtime ships no
+library's tests: every `tests` directory of NumPy is excluded by its exact path.
+NumPy does not use them at run time, and their data holds key-shaped test vectors
+that a release's keys sweep reads as keys. The browser
 consumer calls `releasePreloadedFileData` after session ready, not merely after
 the module factory resolves. Leave `BW_SESSION` unset in the product.
 
