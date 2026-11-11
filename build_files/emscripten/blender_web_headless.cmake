@@ -14,6 +14,21 @@ function(blender_web_payload_exclusions out_var python_home scripts)
     "${python_home}/pydoc_data"
     "${python_home}/venv"
     "${scripts}/addons_core/ui_translate")
+  # A runtime ships no library's tests. NumPy's test packages are not used at run time, and their data carries
+  # key-shaped test vectors (numpy/random/tests' JUMP_TEST_DATA digests) that a release's keys sweep reads as keys.
+  # Each test directory is excluded by its exact path (a wildcard here would be expanded by the link command's
+  # shell), and the build refuses when it finds none, as it does for every other exclusion.
+  file(GLOB_RECURSE _numpy_entries LIST_DIRECTORIES true "${python_home}/site-packages/numpy/*")
+  set(_numpy_tests "")
+  foreach(_entry IN LISTS _numpy_entries)
+    if(IS_DIRECTORY "${_entry}" AND _entry MATCHES "/tests$")
+      list(APPEND _numpy_tests "${_entry}")
+    endif()
+  endforeach()
+  if(NOT _numpy_tests)
+    message(FATAL_ERROR "wasm payload exclusion missing: no tests directory under ${python_home}/site-packages/numpy")
+  endif()
+  list(APPEND _paths ${_numpy_tests})
   set(_result "")
   foreach(_path IN LISTS _paths)
     if(NOT EXISTS "${_path}")
