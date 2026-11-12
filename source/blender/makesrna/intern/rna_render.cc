@@ -420,6 +420,20 @@ static StructRNA *rna_RenderEngine_register(Main *bmain,
   et->update_render_passes = (have_function[8]) ? engine_update_render_passes : nullptr;
   et->update_custom_camera = (have_function[9]) ? engine_update_custom_camera : nullptr;
 
+#if defined(__EMSCRIPTEN__) && defined(WITH_HEADLESS)
+  /* A Python engine that takes a built-in's id stands in for it, so without passes of its own it
+   * declares the shadowed built-in's: the compositor's Render Layers node then offers the passes
+   * the native engine would (Mist, Depth, ...) instead of marking them unavailable. The built-in
+   * callbacks only register passes on the engine they are given. */
+  if (et->update_render_passes == nullptr) {
+    const RenderEngineType *shadowed = static_cast<const RenderEngineType *>(
+        BLI_findstring(&R_engines_shadowed, et->idname, offsetof(RenderEngineType, idname)));
+    if (shadowed) {
+      et->update_render_passes = shadowed->update_render_passes;
+    }
+  }
+#endif
+
   RE_engines_register(et);
 
   return et->rna_ext.srna;
