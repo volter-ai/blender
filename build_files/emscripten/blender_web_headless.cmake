@@ -113,7 +113,7 @@ function(blender_web_add_editor source_target variant)
 -sENVIRONMENT=web,worker,node \
 -sMODULARIZE=1 -sEXPORT_NAME=createBlenderModule \
 -sEXPORTED_RUNTIME_METHODS=ENV,FS,callMain,HEAPU8 \
--sEXPORTED_FUNCTIONS=_main,_blender_web_export_frame,_blender_web_export_buffer,_blender_web_export_buffer_size,_blender_web_export_session_reset,_malloc,_free \
+-sEXPORTED_FUNCTIONS=_main,_blender_web_export_frame,_blender_web_export_buffer,_blender_web_export_buffer_size,_blender_web_export_session_reset,_blender_web_channel_word,_malloc,_free \
 -sINCOMING_MODULE_JS_API=ENVIRONMENT,arguments,canvas,dynamicLibraries,elementPointerLock,instantiateWasm,locateFile,mainScriptUrlOrBlob,monitorRunDependencies,noExitRuntime,noInitialRun,onAbort,onExit,onRuntimeInitialized,postRun,preInit,preRun,print,printErr,setStatus,statusMessage,stderr,stdin,stdout,thisProgram,wasm,websocket")
   if(variant STREQUAL "release")
     string(APPEND _flags " -O2 -g0 -sASSERTIONS=0")
