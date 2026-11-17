@@ -72,6 +72,7 @@
 
 #ifdef __EMSCRIPTEN__
 #  include <emscripten/heap.h>
+#  include <emscripten/threading_primitives.h>
 #  include <malloc.h>
 #endif
 
@@ -3592,6 +3593,36 @@ static PyObject *py_memory_reset_peak(PyObject * /*self*/, PyObject * /*args*/)
   Py_RETURN_NONE;
 }
 
+#ifdef __EMSCRIPTEN__
+/** THE SESSION'S CHANNEL WORD: the tab's worker adds one to it after each file it writes for the session (a request's
+ *  or a reply's `.done`) and notifies it (`Atomics.add`, `Atomics.notify` on the shared heap), and the session's loop
+ *  sleeps on it between readings of its directory (`wait_channel`). */
+static volatile uint32_t g_channel_word = 0;
+
+/** The word's address in the heap, for the worker's `Atomics` calls (exported, `blender_web_headless.cmake`). */
+extern "C" volatile uint32_t *blender_web_channel_word()
+{
+  return &g_channel_word;
+}
+
+/** Sleep until the channel word is no longer `seen`, and answer it. A wake can be spurious
+ *  (`emscripten/threading_primitives.h`), so the wait goes on until the word moved; the GIL is released meanwhile. */
+static PyObject *py_wait_channel(PyObject * /*self*/, PyObject *arg)
+{
+  const unsigned long seen = PyLong_AsUnsignedLong(arg);
+  if (seen == (unsigned long)-1 && PyErr_Occurred()) {
+    return nullptr;
+  }
+  uint32_t now;
+  Py_BEGIN_ALLOW_THREADS;
+  while ((now = __atomic_load_n(&g_channel_word, __ATOMIC_SEQ_CST)) == uint32_t(seen)) {
+    emscripten_futex_wait(&g_channel_word, uint32_t(seen), INFINITY);
+  }
+  Py_END_ALLOW_THREADS;
+  return PyLong_FromUnsignedLong(now);
+}
+#endif
+
 static PyMethodDef web_methods[] = {
     {"begin_render_export", py_begin_render_export, METH_O,
      "Scope exports and deferred pulls to a render engine's RENDER depsgraph; pair with end_render_export in finally before render returns."},
@@ -3600,6 +3631,8 @@ static PyMethodDef web_methods[] = {
 #ifdef __EMSCRIPTEN__
     {"set_read_checkpoint", py_set_read_checkpoint, METH_O,
      "Set browser file-reader backpressure on this thread; None removes it. No Blender access in callback."},
+    {"wait_channel", py_wait_channel, METH_O,
+     "Sleep until the session's channel word is no longer the one given, and answer it."},
 #endif
     {"export_frame", py_export_frame, METH_VARARGS, "The export door: one frame as JSON."},
     {"export_frame_chunked", py_export_frame_chunked, METH_VARARGS,
